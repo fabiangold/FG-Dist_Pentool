@@ -16,17 +16,20 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QSplashScreen,
     QComboBox,
+    QTabWidget,
+    QMenu,
 )
+from PyQt6.QtGui import QAction
 
 # ────────────────────────────────────────────────────────────
 #  DATA
 # ────────────────────────────────────────────────────────────
 
 TOOL_WIKI = {
-    "nmap": {"url":"https://nmap.org/docs.html","examples":["nmap -sV -sC -p- <target>","nmap -sS -A -T4 <target>","nmap -p 80,443 --script vuln <target>"],"desc":"Network exploration tool and security/port scanner."},
-    "masscan": {"url":"https://github.com/robertdavidgraham/masscan","examples":["masscan -p1-65535 --rate=1000 <target>","masscan -p80,443 <target/24>"],"desc":"High-speed TCP port scanner."},
+    "nmap": {"url":"https://nmap.org/docs.html","examples":["nmap -sV -sC -p- <target>","nmap -sS -A -T4 <target>","nmap -p 80,443 --script vuln <target>"],"desc":"Network exploration tool and security/port scanner.","req":["sudo"]},
+    "masscan": {"url":"https://github.com/robertdavidgraham/masscan","examples":["masscan -p1-65535 --rate=1000 <target>","masscan -p80,443 <target/24>"],"desc":"High-speed TCP port scanner.","req":["sudo"]},
     "naabu": {"url":"https://github.com/projectdiscovery/naabu","examples":["naabu -host <target>","naabu -list hosts.txt -top-ports 1000"],"desc":"Fast port scanner written in Go."},
-    "netdiscover": {"url":"https://github.com/netdiscover-scanner/netdiscover","examples":["sudo netdiscover -r 192.168.1.0/24","sudo netdiscover -i eth0 -P"],"desc":"ARP-based network scanner."},
+    "netdiscover": {"url":"https://github.com/netdiscover-scanner/netdiscover","examples":["sudo netdiscover -r 192.168.1.0/24","sudo netdiscover -i eth0 -P"],"desc":"ARP-based network scanner.","req":["sudo"]},
     "nbtscan": {"url":"https://github.com/resurrecting-open-source-projects/nbtscan","examples":["nbtscan 192.168.1.0/24","nbtscan -v -s : <target>"],"desc":"NBT (NetBIOS) name scanner."},
     "smbmap": {"url":"https://github.com/ShawnDEvans/smbmap","examples":["smbmap -H <target>","smbmap -u guest -p '' -H <target>"],"desc":"SMB enumeration tool."},
     "enum4linux": {"url":"https://github.com/cddmp/enum4linux-ng","examples":["enum4linux-ng -A <target>","enum4linux-ng -u user -p pass <target>"],"desc":"Windows/Samba enumeration tool."},
@@ -750,42 +753,68 @@ class DetailPanel(QFrame):
 
 class ToolCard(QFrame):
     clicked = pyqtSignal(str)
+    context_menu_requested = pyqtSignal(str, object)
     def __init__(self, key, name, desc):
         super().__init__()
-        self.key = key; self._name = name; self._selected = False
+        self.key = key; self._name = name; self._selected = False; self._status = "idle"
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFrameStyle(QFrame.Shape.NoFrame)
         installed = check_installed(key)
-        badge = f'<span style="color:{C["green"]};">● installed</span>' if installed else f'<span style="color:{C["dim"]};">○ missing</span>'
+        badge = f'<span style="color:{C["green"]};">●</span>' if installed else f'<span style="color:{C["dim"]};">○</span>'
+        
+        req_tags = ""
+        cmd = TOOL_CMDS.get(key, "")
+        if cmd.startswith("sudo ") or "sudo " in cmd: req_tags += '<span style="color:#ff9e3b;font-size:9px;">🔒</span> '
+        if "wlan" in cmd or "wifi" in desc.lower() or "aircrack" in key.lower() or "wifite" in key.lower(): req_tags += '<span style="color:#7dcfff;font-size:9px;">📡</span> '
+        if "gui" in cmd.lower() or "ettercap -G" in cmd: req_tags += '<span style="color:#bb9af7;font-size:9px;">🖥️</span> '
+        if "aws" in desc.lower() or "cloud" in desc.lower() or "pacu" in key: req_tags += '<span style="color:#f7c948;font-size:9px;">☁️</span> '
+
         html = (
-            f'<div style="font-size:13px;color:{C["blue"]};margin-bottom:2px;">&gt; {name}</div>'
-            f'<div style="font-size:11px;color:{C["soft"]};">{desc[:90]}{"…" if len(desc)>90 else ""}</div>'
-            f'<div style="margin-top:6px;font-size:10px;">{badge}</div>'
+            f'<div style="font-size:13px;color:{C["blue"]};margin-bottom:2px;">&gt; {name} {badge}</div>'
+            f'<div style="font-size:11px;color:{C["soft"]};">{desc[:85]}{"…" if len(desc)>85 else ""}</div>'
+            f'<div style="margin-top:4px;font-size:10px;">{req_tags}<span id="status" style="color:{C["dim"]};">idle</span></div>'
         )
         self._label = QLabel(html)
         self._label.setWordWrap(True)
+        self._label.setTextFormat(Qt.TextFormat.RichText)
         self._set_style("default")
         l = QVBoxLayout(self); l.setContentsMargins(0,0,0,0); l.addWidget(self._label)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_context_menu)
+
+    def _show_context_menu(self, pos):
+        self.context_menu_requested.emit(self.key, pos)
 
     def _set_style(self, state):
         m = {
             "default": (C["card"], C["border"]),
             "hover": (C["surface"], f"{C['green']}55"),
             "selected": (C["surface2"], C["green"]),
+            "running": (f"{C['orange']}22", C["orange"]),
         }
         bg, bd = m.get(state, m["default"])
         self._label.setStyleSheet(
             f"QLabel{{background:{bg};border:1px solid {bd};border-radius:10px;padding:12px 14px;font-family:monospace;min-height:92px;}}"
         )
 
+    def set_status(self, status):
+        self._status = status
+        if status == "running":
+            self._set_style("running")
+            self._label.setText(self._label.text().replace('<span id="status" style="color:#6c7086;">idle</span>', '<span id="status" style="color:#ff9e3b;">⟳ running...</span>').replace('<span id="status" style="color:#00ff88;">✓ done</span>', '<span id="status" style="color:#ff9e3b;">⟳ running...</span>'))
+        elif status == "idle":
+            self._set_style("selected" if self._selected else "default")
+            self._label.setText(self._label.text().replace('<span id="status" style="color:#ff9e3b;">⟳ running...</span>', '<span id="status" style="color:#00ff88;">✓ done</span>').replace('<span id="status" style="color:#6c7086;">idle</span>', '<span id="status" style="color:#6c7086;">idle</span>'))
+
     def set_selected(self, s):
         self._selected = s
-        self._set_style("selected" if s else "default")
+        if self._status != "running":
+            self._set_style("selected" if s else "default")
     def mousePressEvent(self, e): self.clicked.emit(self.key)
     def enterEvent(self, e):
-        if not self._selected: self._set_style("hover")
+        if not self._selected and self._status != "running": self._set_style("hover")
     def leaveEvent(self, e):
-        if not self._selected: self._set_style("default")
+        if not self._selected and self._status != "running": self._set_style("default")
 
 # ────────────────────────────────────────────────────────────
 #  MAIN WINDOW
@@ -804,10 +833,7 @@ class MainWindow(QMainWindow):
         self._selected_key = None
         self._all_cards = []
         self._wiki_mode = False
-        self._proc = None
         self._log_tail_stop = None
-        self._queue = []
-        self._queue_running = False
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -852,6 +878,8 @@ class MainWindow(QMainWindow):
         )
         hdr.addWidget(app_badge)
 
+        self._macros_btn = QPushButton("⚡ macros"); self._macros_btn.setStyleSheet(_BTN); self._macros_btn.setCursor(Qt.CursorShape.PointingHandCursor); self._macros_btn.clicked.connect(self._show_macros_dialog)
+        self._report_btn = QPushButton("📊 report"); self._report_btn.setStyleSheet(_BTN); self._report_btn.setCursor(Qt.CursorShape.PointingHandCursor); self._report_btn.clicked.connect(self._generate_report)
         self._wiki_btn = QPushButton("📖 wiki"); self._wiki_btn.setStyleSheet(_BTN_O); self._wiki_btn.setCursor(Qt.CursorShape.PointingHandCursor); self._wiki_btn.clicked.connect(self._toggle_wiki)
         self._help_btn = QPushButton("❓ help"); self._help_btn.setStyleSheet(_BTN); self._help_btn.setCursor(Qt.CursorShape.PointingHandCursor); self._help_btn.clicked.connect(lambda: self._maybe_show_onboarding(force=True))
         self._launcher_btn = QPushButton("🚀 launcher"); self._launcher_btn.setStyleSheet(_BTN); self._launcher_btn.setCursor(Qt.CursorShape.PointingHandCursor); self._launcher_btn.clicked.connect(self._install_desktop_launcher)
@@ -867,7 +895,7 @@ class MainWindow(QMainWindow):
         self._install_btn = QPushButton("⬇ install missing"); self._install_btn.setStyleSheet(_BTN); self._install_btn.setCursor(Qt.CursorShape.PointingHandCursor); self._install_btn.clicked.connect(self._install_missing)
         self._refresh_btn = QPushButton("↻ refresh"); self._refresh_btn.setStyleSheet(_BTN); self._refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor); self._refresh_btn.clicked.connect(self._refresh_status)
         self._term_toggle_btn = QPushButton("⌨ terminal"); self._term_toggle_btn.setStyleSheet(_BTN); self._term_toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor); self._term_toggle_btn.clicked.connect(self._toggle_terminal)
-        hdr.addWidget(self._wiki_btn); hdr.addWidget(self._help_btn); hdr.addWidget(self._launcher_btn); hdr.addWidget(self._settings_btn); hdr.addWidget(self._theme_combo); hdr.addWidget(self._install_btn); hdr.addWidget(self._refresh_btn); hdr.addWidget(self._term_toggle_btn)
+        hdr.addWidget(self._macros_btn); hdr.addWidget(self._report_btn); hdr.addWidget(self._wiki_btn); hdr.addWidget(self._help_btn); hdr.addWidget(self._launcher_btn); hdr.addWidget(self._settings_btn); hdr.addWidget(self._theme_combo); hdr.addWidget(self._install_btn); hdr.addWidget(self._refresh_btn); hdr.addWidget(self._term_toggle_btn)
         self._stats = QLabel()
         self._stats.setStyleSheet(f"font-size:12px;color:{C['dim']};font-family:monospace;padding:4px 0;")
         hdr.addWidget(self._stats)
@@ -877,11 +905,15 @@ class MainWindow(QMainWindow):
         # ── target bar + search ──
         bar = QHBoxLayout()
         tgt = QLabel("🎯 target"); tgt.setStyleSheet(f"font-size:12px;color:{C['dim']};font-family:monospace;")
-        self._target = QLineEdit()
-        self._target.setPlaceholderText("192.168.1.1  ·  example.com")
-        self._target.setStyleSheet(f"QLineEdit{{background:{C['surface']};border:1px solid {C['border']};border-radius:10px;padding:10px 14px;color:{C['yellow']};font-size:13px;font-family:monospace;min-width:280px;}}QLineEdit:focus{{border:1px solid {C['green']}88;}}")
-        clr = QPushButton("✕"); clr.setStyleSheet(f"QPushButton{{background:transparent;border:none;color:{C['dim']};font-size:12px;}}QPushButton:hover{{color:{C['fg']};}}"); clr.setCursor(Qt.CursorShape.PointingHandCursor); clr.clicked.connect(self._target.clear)
-        bar.addWidget(tgt); bar.addWidget(self._target); bar.addWidget(clr)
+        self._target_history = QComboBox()
+        self._target_history.setEditable(True)
+        self._target_history.lineEdit().setPlaceholderText("192.168.1.1  ·  example.com")
+        self._target_history.setStyleSheet(f"QComboBox{{background:{C['surface']};border:1px solid {C['border']};border-radius:10px;padding:8px 12px;color:{C['yellow']};font-size:13px;font-family:monospace;min-width:240px;}}QComboBox:focus{{border:1px solid {C['green']}88;}}QComboBox::drop-down{{border:0;}}")
+        self._target_history.lineEdit().returnPressed.connect(self._save_current_target)
+        self._target_history.activated.connect(self._on_target_selected)
+        self._load_target_history()
+        clr = QPushButton("✕"); clr.setStyleSheet(f"QPushButton{{background:transparent;border:none;color:{C['dim']};font-size:12px;}}QPushButton:hover{{color:{C['fg']};}}"); clr.setCursor(Qt.CursorShape.PointingHandCursor); clr.clicked.connect(self._target_history.lineEdit().clear)
+        bar.addWidget(tgt); bar.addWidget(self._target_history); bar.addWidget(clr)
 
         self._search = QLineEdit()
         self._search.setPlaceholderText("🔍  filter tools by name or category…")
@@ -918,13 +950,23 @@ class MainWindow(QMainWindow):
         self._wiki_scroll.setWidget(self._wiki_sw)
         self._stack.addWidget(self._wiki_scroll)
 
+        # page 2 — results viewer
+        self._results_scroll = QScrollArea()
+        self._results_scroll.setWidgetResizable(True)
+        self._results_scroll.setStyleSheet(f"QScrollArea{{border:none;background:transparent;}}QScrollBar:vertical{{width:5px;background:{C['bg']};}}QScrollBar::handle:vertical{{background:{C['dim']}66;border-radius:3px;}}QScrollBar::add-line:vertical{{height:0;}}QScrollBar::sub-line:vertical{{height:0;}}")
+        self._results_sw = QWidget()
+        self._results_sl = QVBoxLayout(self._results_sw)
+        self._results_sl.setContentsMargins(0,0,0,0); self._results_sl.setSpacing(6)
+        self._results_scroll.setWidget(self._results_sw)
+        self._stack.addWidget(self._results_scroll)
+
         outer.addWidget(self._stack, stretch=1)
 
         # ── detail panel ──
         self._detail = DetailPanel()
         outer.addWidget(self._detail)
 
-        # ── embedded terminal ──
+        # ── embedded terminal (tabbed) ──
         self._term_visible = True
         self._root_mode = True
         term_box = QFrame()
@@ -943,9 +985,13 @@ class MainWindow(QMainWindow):
         self._root_btn.setStyleSheet(_BTN)
         self._root_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._root_btn.clicked.connect(self._toggle_root)
+        self._new_term_tab_btn = QPushButton("+ tab")
+        self._new_term_tab_btn.setStyleSheet(_BTN)
+        self._new_term_tab_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._new_term_tab_btn.clicked.connect(self._add_terminal_tab)
         clear_btn = QPushButton("clear")
         clear_btn.setStyleSheet(_BTN)
-        clear_btn.clicked.connect(lambda: self._term_out.clear())
+        clear_btn.clicked.connect(self._clear_active_terminal)
         stop_btn = QPushButton("stop")
         stop_btn.setStyleSheet(_BTN_O)
         stop_btn.clicked.connect(self._stop_terminal_cmd)
@@ -959,6 +1005,7 @@ class MainWindow(QMainWindow):
         save_btn.setStyleSheet(_BTN)
         save_btn.clicked.connect(self._save_terminal_session)
         term_top.addWidget(self._root_btn)
+        term_top.addWidget(self._new_term_tab_btn)
         term_top.addWidget(clear_btn)
         term_top.addWidget(stop_btn)
         term_top.addWidget(install_live_btn)
@@ -966,38 +1013,18 @@ class MainWindow(QMainWindow):
         term_top.addWidget(save_btn)
         term_l.addLayout(term_top)
 
-        self._term_out = QTextEdit()
-        self._term_out.setReadOnly(True)
-        self._term_out.setMinimumHeight(220)
-        self._term_out.setStyleSheet(
-            f"QTextEdit{{background:{C['bg']};border:1px solid {C['border']};border-radius:8px;padding:10px;color:{C['fg']};font-family:monospace;font-size:12px;}}"
+        self._term_tabs = QTabWidget()
+        self._term_tabs.setTabsClosable(True)
+        self._term_tabs.tabCloseRequested.connect(self._close_terminal_tab)
+        self._term_tabs.setStyleSheet(
+            f"QTabWidget::pane{{border:1px solid {C['border']};border-radius:6px;}}"
+            f"QTabBar::tab{{background:{C['surface2']};color:{C['dim']};padding:6px 14px;margin-right:2px;border-radius:4px 4px 0 0;font-family:monospace;font-size:11px;}}"
+            f"QTabBar::tab:selected{{background:{C['bg']};color:{C['fg']};}}"
+            f"QTabBar::tab:hover{{background:{C['card']};color:{C['fg']};}}"
         )
-        term_l.addWidget(self._term_out)
-
-        term_in_row = QHBoxLayout()
-        self._term_in = QLineEdit()
-        self._term_in.setPlaceholderText("run command (root by default)…")
-        self._term_in.setStyleSheet(
-            f"QLineEdit{{background:{C['bg']};border:1px solid {C['border']};border-radius:8px;padding:9px 12px;color:{C['fg']};font-family:monospace;font-size:12px;}}"
-        )
-        self._term_in.returnPressed.connect(self._run_from_input)
-        run_btn = QPushButton("▶ run")
-        run_btn.setStyleSheet(_BTN_P)
-        run_btn.clicked.connect(self._run_from_input)
-        q_add_btn = QPushButton("+ queue")
-        q_add_btn.setStyleSheet(_BTN)
-        q_add_btn.clicked.connect(self._queue_from_input)
-        q_run_btn = QPushButton("run queue")
-        q_run_btn.setStyleSheet(_BTN_O)
-        q_run_btn.clicked.connect(self._run_queue)
-        term_in_row.addWidget(self._term_in)
-        term_in_row.addWidget(run_btn)
-        term_in_row.addWidget(q_add_btn)
-        term_in_row.addWidget(q_run_btn)
-        term_l.addLayout(term_in_row)
-        self._queue_label = QLabel("queue: 0")
-        self._queue_label.setStyleSheet(f"font-size:11px;color:{C['dim']};font-family:monospace;")
-        term_l.addWidget(self._queue_label)
+        term_l.addWidget(self._term_tabs)
+        self._term_tab_index = 0
+        self._add_terminal_tab("Terminal 1")
 
         self._term_box = term_box
         outer.addWidget(term_box)
@@ -1028,6 +1055,45 @@ class MainWindow(QMainWindow):
         self._maybe_show_onboarding(force=False)
 
     # ── helpers ──
+
+    def _load_target_history(self):
+        hist_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".target_history.json")
+        try:
+            if os.path.exists(hist_path):
+                with open(hist_path, "r", encoding="utf-8") as f:
+                    history = json.load(f)
+                self._target_history.addItems(history)
+        except Exception:
+            pass
+
+    def _save_current_target(self):
+        target = self._target_history.lineEdit().text().strip()
+        if not target: return
+        hist_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".target_history.json")
+        history = []
+        try:
+            if os.path.exists(hist_path):
+                with open(hist_path, "r", encoding="utf-8") as f:
+                    history = json.load(f)
+        except Exception:
+            pass
+        if target in history:
+            history.remove(target)
+        history.insert(0, target)
+        history = history[:20]
+        try:
+            with open(hist_path, "w", encoding="utf-8") as f:
+                json.dump(history, f, indent=2)
+        except Exception:
+            pass
+        self._target_history.clear()
+        self._target_history.addItems(history)
+        self._target_history.lineEdit().setText(target)
+
+    def _on_target_selected(self, idx):
+        target = self._target_history.itemText(idx)
+        self._target_history.lineEdit().setText(target)
+        self._save_current_target()
 
     def _close_detail(self):
         if self._selected_key:
@@ -1374,9 +1440,91 @@ class MainWindow(QMainWindow):
             self._log_tail_stop = None
 
     def _append_terminal(self, text):
-        self._term_out.insertPlainText(text)
-        sb = self._term_out.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        idx = self._term_tabs.currentIndex()
+        if idx < 0: return
+        widget = self._term_tabs.widget(idx)
+        if not widget: return
+        out = widget.findChild(QTextEdit, "term_out")
+        if out:
+            out.insertPlainText(text)
+            sb = out.verticalScrollBar()
+            sb.setValue(sb.maximum())
+
+    def _get_active_terminal(self):
+        idx = self._term_tabs.currentIndex()
+        if idx < 0: return None, None, None
+        widget = self._term_tabs.widget(idx)
+        if not widget: return None, None, None
+        out = widget.findChild(QTextEdit, "term_out")
+        inp = widget.findChild(QLineEdit, "term_in")
+        return widget, out, inp
+
+    def _clear_active_terminal(self):
+        _, out, _ = self._get_active_terminal()
+        if out: out.clear()
+
+    def _add_terminal_tab(self, name=None):
+        self._term_tab_index += 1
+        tab_name = name or f"Terminal {self._term_tab_index}"
+        tab_widget = QWidget()
+        tab_widget._queue = []
+        tab_widget._queue_running = False
+        tab_widget._proc = None
+        lay = QVBoxLayout(tab_widget)
+        lay.setContentsMargins(4, 4, 4, 4)
+        lay.setSpacing(6)
+
+        out = QTextEdit()
+        out.setObjectName("term_out")
+        out.setReadOnly(True)
+        out.setMinimumHeight(200)
+        out.setStyleSheet(
+            f"QTextEdit{{background:{C['bg']};border:1px solid {C['border']};border-radius:6px;padding:8px;color:{C['fg']};font-family:monospace;font-size:12px;}}"
+        )
+        lay.addWidget(out)
+
+        term_in_row = QHBoxLayout()
+        inp = QLineEdit()
+        inp.setObjectName("term_in")
+        inp.setPlaceholderText("run command (root by default)…")
+        inp.setStyleSheet(
+            f"QLineEdit{{background:{C['bg']};border:1px solid {C['border']};border-radius:8px;padding:9px 12px;color:{C['fg']};font-family:monospace;font-size:12px;}}"
+        )
+        inp.returnPressed.connect(lambda: self._run_from_input())
+        run_btn = QPushButton("▶ run")
+        run_btn.setStyleSheet(_BTN_P)
+        run_btn.clicked.connect(lambda: self._run_from_input())
+        q_add_btn = QPushButton("+ queue")
+        q_add_btn.setStyleSheet(_BTN)
+        q_add_btn.clicked.connect(lambda: self._queue_from_input())
+        q_run_btn = QPushButton("run queue")
+        q_run_btn.setStyleSheet(_BTN_O)
+        q_run_btn.clicked.connect(lambda: self._run_queue())
+        term_in_row.addWidget(inp)
+        term_in_row.addWidget(run_btn)
+        term_in_row.addWidget(q_add_btn)
+        term_in_row.addWidget(q_run_btn)
+        lay.addLayout(term_in_row)
+
+        queue_lbl = QLabel("queue: 0")
+        queue_lbl.setObjectName("queue_lbl")
+        queue_lbl.setStyleSheet(f"font-size:11px;color:{C['dim']};font-family:monospace;")
+        lay.addWidget(queue_lbl)
+
+        tab_idx = self._term_tabs.addTab(tab_widget, tab_name)
+        self._term_tabs.setCurrentIndex(tab_idx)
+        inp.setFocus()
+
+    def _close_terminal_tab(self, idx):
+        if self._term_tabs.count() <= 1:
+            return
+        widget = self._term_tabs.widget(idx)
+        if widget:
+            proc = getattr(widget, "_proc", None)
+            if proc and proc.poll() is None:
+                try: proc.terminate()
+                except: pass
+        self._term_tabs.removeTab(idx)
 
     def _toggle_terminal(self):
         self._term_visible = not self._term_visible
@@ -1386,80 +1534,121 @@ class MainWindow(QMainWindow):
     def _toggle_root(self):
         self._root_mode = self._root_btn.isChecked()
         self._root_btn.setText("🔓 root" if self._root_mode else "🔒 user")
-        self._term_in.setPlaceholderText(
-            "run command (root by default)…" if self._root_mode else "run command (user mode)…"
-        )
+        self._update_terminal_placeholders()
+
+    def _update_terminal_placeholders(self):
+        txt = "run command (root by default)…" if self._root_mode else "run command (user mode)…"
+        for i in range(self._term_tabs.count()):
+            w = self._term_tabs.widget(i)
+            if w:
+                inp = w.findChild(QLineEdit, "term_in")
+                if inp: inp.setPlaceholderText(txt)
 
     def _update_queue_label(self):
-        state = "running" if self._queue_running else "idle"
-        self._queue_label.setText(f"queue: {len(self._queue)} ({state})")
+        _, _, _ = self._get_active_terminal()
+        for i in range(self._term_tabs.count()):
+            w = self._term_tabs.widget(i)
+            if w:
+                lbl = w.findChild(QLabel, "queue_lbl")
+                if lbl:
+                    state = "running" if getattr(w, "_queue_running", False) else "idle"
+                    q = getattr(w, "_queue", [])
+                    lbl.setText(f"queue: {len(q)} ({state})")
 
     def _stop_terminal_cmd(self):
         self._stop_log_tail()
-        self._queue_running = False
-        self._update_queue_label()
-        if self._proc and self._proc.poll() is None:
-            try:
-                self._proc.terminate()
-            except Exception:
-                pass
-            self._append_terminal("\n[stopped]\n")
+        for i in range(self._term_tabs.count()):
+            w = self._term_tabs.widget(i)
+            if w:
+                w._queue_running = False
+                proc = getattr(w, "_proc", None)
+                if proc and proc.poll() is None:
+                    try: proc.terminate()
+                    except: pass
+        _, out, _ = self._get_active_terminal()
+        if out: out.insertPlainText("\n[stopped]\n")
 
     def _run_from_input(self):
-        cmd = self._term_in.text().strip()
-        if not cmd:
-            return
+        _, _, inp = self._get_active_terminal()
+        if not inp: return
+        cmd = inp.text().strip()
+        if not cmd: return
+        target = self._target_history.lineEdit().text().strip()
+        if target:
+            cmd = cmd.replace("<target>", target).replace("<domain>", target)
         self._run_in_terminal(cmd)
 
     def _queue_from_input(self):
-        cmd = self._term_in.text().strip()
-        if not cmd:
-            return
-        self._queue.append(cmd)
+        _, _, inp = self._get_active_terminal()
+        if not inp: return
+        cmd = inp.text().strip()
+        if not cmd: return
+        target = self._target_history.lineEdit().text().strip()
+        if target:
+            cmd = cmd.replace("<target>", target).replace("<domain>", target)
+        idx = self._term_tabs.currentIndex()
+        w = self._term_tabs.widget(idx)
+        if not hasattr(w, "_queue"): w._queue = []
+        w._queue.append(cmd)
         self._append_terminal(f"[queue] added: {cmd}\n")
-        self._term_in.clear()
+        inp.clear()
         self._update_queue_label()
 
     def _run_queue(self):
-        if self._queue_running:
+        idx = self._term_tabs.currentIndex()
+        w = self._term_tabs.widget(idx)
+        if not w: return
+        if getattr(w, "_queue_running", False):
             self._append_terminal("[queue] already running\n")
             return
-        if not self._queue:
+        if not hasattr(w, "_queue") or not w._queue:
             self._append_terminal("[queue] empty\n")
             return
-        self._queue_running = True
+        w._queue_running = True
         self._update_queue_label()
-        self._append_terminal(f"[queue] starting {len(self._queue)} command(s)\n")
+        self._append_terminal(f"[queue] starting {len(w._queue)} command(s)\n")
         self._run_next_queued()
 
     def _run_next_queued(self):
-        if not self._queue_running:
-            return
-        if self._proc and self._proc.poll() is None:
-            return
-        if not self._queue:
-            self._queue_running = False
+        idx = self._term_tabs.currentIndex()
+        w = self._term_tabs.widget(idx)
+        if not w: return
+        if not getattr(w, "_queue_running", False): return
+        if getattr(w, "_proc", None) and w._proc.poll() is None: return
+        if not w._queue:
+            w._queue_running = False
             self._update_queue_label()
             self._append_terminal("[queue] finished\n")
             return
-        cmd = self._queue.pop(0)
+        cmd = w._queue.pop(0)
         self._update_queue_label()
         self._run_in_terminal(cmd, on_done=lambda code: self._run_next_queued())
 
     def _run_in_terminal(self, cmd, on_done=None):
-        if not cmd:
+        if not cmd: return False
+        idx = self._term_tabs.currentIndex()
+        w = self._term_tabs.widget(idx)
+        if not w: return False
+        _, out, _ = self._get_active_terminal()
+        if getattr(w, "_proc", None) and w._proc.poll() is None:
+            if out: out.insertPlainText("\n[busy] stop current command first\n")
             return False
-        if self._proc and self._proc.poll() is None:
-            self._append_terminal("\n[busy] stop current command first\n")
-            return False
+
         # root mode: prepend sudo if not already present
         if self._root_mode and not cmd.startswith("sudo "):
             run_cmd = f"sudo {cmd}"
         else:
             run_cmd = cmd
-        self._append_terminal(f"\n$ {run_cmd}\n")
+
+        if out: out.insertPlainText(f"\n$ {run_cmd}\n")
+
+        # Track live status for tool cards
+        tool_key = self._find_tool_key_for_command(cmd)
+        if tool_key:
+            self._set_tool_status(tool_key, "running")
+
         try:
-            self._proc = subprocess.Popen(
+            w._proc = subprocess.Popen(
                 ["bash", "-lc", run_cmd],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -1467,24 +1656,37 @@ class MainWindow(QMainWindow):
                 bufsize=1,
             )
         except Exception as e:
-            self._append_terminal(f"[error] {e}\n")
+            if out: out.insertPlainText(f"[error] {e}\n")
             return False
 
-        def reader(proc):
+        def reader(proc, widget, tk=tool_key):
             try:
                 for line in iter(proc.stdout.readline, ""):
                     QTimer.singleShot(0, lambda ln=line: self._append_terminal(ln))
             finally:
                 proc.wait()
                 code = proc.returncode
-                def finish(code=code, cb=on_done):
-                    self._append_terminal(f"\n[done] exit={code}\n")
-                    if cb:
-                        cb(code)
+                def finish(code=code, cb=on_done, w=widget, key=tk):
+                    if out: out.insertPlainText(f"\n[done] exit={code}\n")
+                    if key: self._set_tool_status(key, "idle")
+                    if cb: cb(code)
                 QTimer.singleShot(0, finish)
 
-        threading.Thread(target=reader, args=(self._proc,), daemon=True).start()
+        threading.Thread(target=reader, args=(w._proc, w), daemon=True).start()
         return True
+
+    def _find_tool_key_for_command(self, cmd):
+        base = cmd.split()[0].lower() if cmd else ""
+        for key, val in TOOL_CMDS.items():
+            if val.lower().startswith(base) or key.lower() == base:
+                return key
+        return None
+
+    def _set_tool_status(self, key, status):
+        for card in self._all_cards:
+            if card.key == key:
+                card.set_status(status)
+                break
 
     def _save_terminal_session(self):
         reports_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports")
@@ -1493,7 +1695,14 @@ class MainWindow(QMainWindow):
         path = os.path.join(reports_dir, f"terminal_session_{ts}.log")
         try:
             with open(path, "w", encoding="utf-8") as f:
-                f.write(self._term_out.toPlainText())
+                for i in range(self._term_tabs.count()):
+                    w = self._term_tabs.widget(i)
+                    if w:
+                        out = w.findChild(QTextEdit, "term_out")
+                        if out:
+                            f.write(f"--- {self._term_tabs.tabText(i)} ---\n")
+                            f.write(out.toPlainText())
+                            f.write("\n\n")
             self._append_terminal(f"[saved] {path}\n")
         except Exception as e:
             self._append_terminal(f"[error] save failed: {e}\n")
@@ -1539,9 +1748,120 @@ class MainWindow(QMainWindow):
         lay.addWidget(out)
         dlg.exec()
 
+    def _load_favorites(self):
+        fav_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".favorites.json")
+        try:
+            if os.path.exists(fav_path):
+                with open(fav_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception: pass
+        return []
+
+    def _save_favorites(self, favs):
+        fav_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".favorites.json")
+        try:
+            with open(fav_path, "w", encoding="utf-8") as f:
+                json.dump(favs, f, indent=2)
+        except Exception: pass
+
+    def _toggle_favorite(self, key):
+        favs = self._load_favorites()
+        if key in favs:
+            favs.remove(key)
+        else:
+            favs.insert(0, key)
+        self._save_favorites(favs)
+        self._rebuild()
+
+    def _show_macros_dialog(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Quick Macros")
+        dlg.resize(500, 400)
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel("Select a macro to run on the current target:"))
+        
+        macros = {
+            "Quick Recon": ["nmap -sV -sC -p- <target>", "nuclei -u https://<target>", "gowitness file -f urls.txt"],
+            "Web App Audit": ["nmap -p 80,443 --script vuln <target>", "sqlmap -u 'http://<target>/page?id=1' --batch", "nuclei -u https://<target> -t cves/"],
+            "AD Internal": ["nxc smb <target> -u user -p pass", "bloodhound-python -d <domain> -u user -p pass -c All", "responder -I eth0 -wrf"],
+            "WiFi Audit": ["sudo airodump-ng wlan0mon", "sudo wifite2", "sudo reaver -i wlan0mon -b <BSSID> -vv"],
+        }
+
+        for name, cmds in macros.items():
+            btn = QPushButton(f"▶ {name}")
+            btn.setStyleSheet(_BTN_P)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(lambda checked, c=cmds: (self._run_macro(c), dlg.accept()))
+            lay.addWidget(btn)
+            
+            desc = QLabel(" → " + "\n → ".join(cmds))
+            desc.setStyleSheet(f"color:{C['dim']};font-size:10px;font-family:monospace;padding-left:10px;")
+            desc.setWordWrap(True)
+            lay.addWidget(desc)
+
+        lay.addStretch()
+        dlg.exec()
+
+    def _run_macro(self, cmds):
+        target = self._target_history.lineEdit().text().strip() or "<target>"
+        idx = self._term_tabs.currentIndex()
+        w = self._term_tabs.widget(idx)
+        if not w: return
+        if not hasattr(w, "_queue"): w._queue = []
+        for cmd in cmds:
+            safe_cmd = cmd.replace("<target>", target).replace("<domain>", target).replace("<BSSID>", target)
+            w._queue.append(safe_cmd)
+        self._append_terminal(f"[macro] added {len(cmds)} commands to queue\n")
+        self._run_queue()
+
+    def _generate_report(self):
+        target = self._target_history.lineEdit().text().strip() or "unknown"
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        reports_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports")
+        os.makedirs(reports_dir, exist_ok=True)
+        path = os.path.join(reports_dir, f"report_{target}_{ts}.md")
+        
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(f"# FG-Dist Pentool Report\n")
+                f.write(f"**Target:** {target}  \n**Date:** {ts}\n\n")
+                f.write("## Terminal Sessions\n\n")
+                for i in range(self._term_tabs.count()):
+                    w = self._term_tabs.widget(i)
+                    if w:
+                        out = w.findChild(QTextEdit, "term_out")
+                        if out:
+                            f.write(f"### {self._term_tabs.tabText(i)}\n```\n{out.toPlainText()}\n```\n\n")
+            self._append_terminal(f"[report] saved to {path}\n")
+        except Exception as e:
+            self._append_terminal(f"[error] report failed: {e}\n")
+
     # ── tools grid ──
 
     def _build(self):
+        # Favorites section
+        favs = self._load_favorites()
+        if favs:
+            fav_header = QLabel("⭐  Favorites")
+            fav_header.setStyleSheet(f"font-size:13px;color:{C['yellow']};font-family:monospace;padding:8px 12px;background:{C['surface']};border:1px solid {C['border']};border-radius:8px;")
+            self._sl.addWidget(fav_header)
+            
+            fav_grid = QGridLayout()
+            fav_grid.setContentsMargins(4,4,4,4); fav_grid.setSpacing(5)
+            fav_cols = 3
+            for idx, key in enumerate(favs):
+                if key in TOOL_WIKI:
+                    t = TOOL_WIKI[key]
+                    card = ToolCard(key, key, t.get("desc",""))
+                    card.clicked.connect(self._on_click)
+                    card.context_menu_requested.connect(self._show_tool_context_menu)
+                    fav_grid.addWidget(card, idx // fav_cols, idx % fav_cols)
+                    self._all_cards.append(card)
+            self._sl.addWidget(QWidget()) # spacer
+            fav_widget = QWidget()
+            fav_widget.setLayout(fav_grid)
+            self._sl.addWidget(fav_widget)
+
         for cat, tools in CATEGORIES.items():
             open_ = cat in ("Recon & OSINT","Scanning & Enumeration","Exploitation","Web Testing")
             header = QPushButton()
@@ -1564,6 +1884,7 @@ class MainWindow(QMainWindow):
             for idx, (name, t) in enumerate(items):
                 card = ToolCard(t["wiki"], name, t["desc"])
                 card.clicked.connect(self._on_click)
+                card.context_menu_requested.connect(self._show_tool_context_menu)
                 grid.addWidget(card, idx // cols, idx % cols)
                 self._all_cards.append(card)
 
@@ -1575,6 +1896,31 @@ class MainWindow(QMainWindow):
             self._sl.addWidget(header)
             self._sl.addWidget(body)
             self._cat_pairs.append((header, body))
+
+    def _show_tool_context_menu(self, key, pos):
+        menu = QMenu(self)
+        is_fav = key in self._load_favorites()
+        fav_action = QAction("⭐ Remove from Favorites" if is_fav else "☆ Add to Favorites", self)
+        fav_action.triggered.connect(lambda: self._toggle_favorite(key))
+        menu.addAction(fav_action)
+        
+        run_action = QAction("▶ Run", self)
+        run_action.triggered.connect(lambda: self._run_in_terminal(TOOL_CMDS.get(key, key)))
+        menu.addAction(run_action)
+        
+        copy_action = QAction("📋 Copy Command", self)
+        copy_action.triggered.connect(lambda: QApplication.clipboard().setText(TOOL_CMDS.get(key, key)))
+        menu.addAction(copy_action)
+        
+        docs_action = QAction("📄 Open Docs", self)
+        url = TOOL_WIKI.get(key, {}).get("url")
+        if url:
+            docs_action.triggered.connect(lambda: self._open_url(url))
+        else:
+            docs_action.setEnabled(False)
+        menu.addAction(docs_action)
+        
+        menu.exec(self.mapToGlobal(pos))
 
     def _on_click(self, key):
         if self._selected_key == key: self._close_detail(); return
