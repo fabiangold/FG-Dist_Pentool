@@ -2,7 +2,7 @@
 
 > Desktop Security Workbench — **beta**
 
-A standalone desktop application that brings **90 penetration testing tools** into one unified, modern UI. Built with PyQt6 for Linux (Ubuntu/Debian/Mint).
+A standalone desktop application that brings **100+ penetration testing tools** into one unified, modern UI. Built with PyQt6 for Linux (Ubuntu/Debian/Mint).
 
 ---
 

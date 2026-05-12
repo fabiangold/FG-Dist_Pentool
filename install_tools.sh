@@ -435,6 +435,91 @@ if [ -x "/opt/sn1per/sniper" ] && ! cmd_ok sn1per; then
 fi
 
 # ──────────────────────────────────────────────────────────────
+# PART 5b: advanced & cloud tools
+# ──────────────────────────────────────────────────────────────
+say "\n=============================================="
+say " PART 5b: advanced & cloud tools"
+say "=============================================="
+
+# crackmapexec / NetExec
+if ! cmd_ok nxc && ! cmd_ok crackmapexec; then
+  run_step "install NetExec (cme replacement)" pip3 install --user --break-system-packages netexec
+fi
+
+# bloodhound-python
+if ! cmd_ok bloodhound-python; then
+  run_step "install bloodhound-python" pip3 install --user --break-system-packages bloodhound
+fi
+
+# responder
+if ! cmd_ok responder; then
+  if [ ! -d "$HOME/.local/opt/Responder" ]; then
+    run_step "clone Responder" git clone --depth 1 https://github.com/lgandx/Responder.git "$HOME/.local/opt/Responder"
+  fi
+  if [ -f "$HOME/.local/opt/Responder/Responder.py" ]; then
+    create_shim "responder" "python3 $HOME/.local/opt/Responder/Responder.py"
+  fi
+fi
+
+# frida
+if ! cmd_ok frida; then
+  run_step "install frida-tools" pip3 install --user --break-system-packages frida-tools
+fi
+
+# jwt_tool
+if ! cmd_ok jwt_tool; then
+  if [ ! -d "$HOME/.local/opt/jwt_tool" ]; then
+    run_step "clone jwt_tool" git clone --depth 1 https://github.com/ticarpi/jwt_tool.git "$HOME/.local/opt/jwt_tool"
+    run_step "install jwt_tool deps" pip3 install --user --break-system-packages -r "$HOME/.local/opt/jwt_tool/requirements.txt"
+  fi
+  if [ -f "$HOME/.local/opt/jwt_tool/jwt_tool.py" ]; then
+    create_shim "jwt_tool" "python3 $HOME/.local/opt/jwt_tool/jwt_tool.py"
+  fi
+fi
+
+# xsstrike
+if ! cmd_ok xsstrike; then
+  if [ ! -d "$HOME/.local/opt/XSStrike" ]; then
+    run_step "clone XSStrike" git clone --depth 1 https://github.com/s0md3v/XSStrike.git "$HOME/.local/opt/XSStrike"
+  fi
+  if [ -f "$HOME/.local/opt/XSStrike/xsstrike.py" ]; then
+    create_shim "xsstrike" "python3 $HOME/.local/opt/XSStrike/xsstrike.py"
+  fi
+fi
+
+# chisel
+if ! cmd_ok chisel; then
+  run_step "install chisel (go)" go install github.com/jpillora/chisel@latest
+fi
+
+# setoolkit
+if ! cmd_ok setoolkit; then
+  if [ ! -d "$HOME/.local/opt/social-engineer-toolkit" ]; then
+    run_step "clone SET" git clone --depth 1 https://github.com/trustedsec/social-engineer-toolkit.git "$HOME/.local/opt/social-engineer-toolkit"
+    run_step "install SET deps" pip3 install --user --break-system-packages -r "$HOME/.local/opt/social-engineer-toolkit/requirements.txt"
+  fi
+  if [ -f "$HOME/.local/opt/social-engineer-toolkit/setup.py" ]; then
+    create_shim "setoolkit" "sudo python3 $HOME/.local/opt/social-engineer-toolkit/setup.py"
+  fi
+fi
+
+# linpeas (script reference)
+if [ ! -f "$HOME/.local/bin/linpeas.sh" ]; then
+  run_step "download linpeas" curl -fsSL https://github.com/peass-ng/PEASS-ng/releases/latest/download/linpeas.sh -o "$HOME/.local/bin/linpeas.sh" && chmod +x "$HOME/.local/bin/linpeas.sh"
+fi
+
+# pacu
+if ! cmd_ok pacu; then
+  if [ ! -d "$HOME/.local/opt/pacu" ]; then
+    run_step "clone pacu" git clone --depth 1 https://github.com/RhinoSecurityLabs/pacu.git "$HOME/.local/opt/pacu"
+    run_step "install pacu deps" pip3 install --user --break-system-packages -r "$HOME/.local/opt/pacu/requirements.txt"
+  fi
+  if [ -f "$HOME/.local/opt/pacu/cli.py" ]; then
+    create_shim "pacu" "python3 $HOME/.local/opt/pacu/cli.py"
+  fi
+fi
+
+# ──────────────────────────────────────────────────────────────
 # PART 6: verification
 # ──────────────────────────────────────────────────────────────
 say "\n=============================================="
@@ -450,7 +535,8 @@ EXPECTED=(
   bandit brakeman python3 theHarvester sherlock holehe nexfil spiderfoot recon-ng
   metagoofil amass subfinder sublist3r gau waybackurls httpx httprobe dnsx dnsrecon dnsenum
   knockpy shuffledns massdns whatweb wafw00f gowitness gospider meg unfurl subjack dnsmap
-  asnip git_dumper cowsay lolcat tor seclists sn1per
+  asnip git_dumper cowsay lolcat tor seclists sn1per jadx
+  nxc bloodhound-python responder frida jwt_tool xsstrike chisel setoolkit linpeas.sh pacu
 )
 
 missing_tmp="$LOG_DIR/missing_commands_$(date +%Y%m%d_%H%M%S).txt"

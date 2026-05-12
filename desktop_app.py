@@ -113,6 +113,16 @@ TOOL_WIKI = {
     "git-dumper": {"url":"https://github.com/arthaud/git-dumper","examples":["git_dumper https://<target>/.git/ output/","git_dumper -f 5 https://<target>/.git/ output/"],"desc":"Dump exposed .git repositories."},
     "cowsay": {"url":"https://github.com/tnalpgge/rank-amateur-cowsay","examples":["cowsay 'hello world'","echo 'test' | cowsay"],"desc":"Configurable speaking cow."},
     "lolcat": {"url":"https://github.com/busyloop/lolcat","examples":["echo 'text' | lolcat","command | lolcat"],"desc":"Rainbow text colorizer."},
+    "crackmapexec": {"url":"https://github.com/Porchetta-Industries/CrackMapExec","examples":["nxc smb <target> -u user -p pass","nxc smb <target> -u user -H <hash> --shares"],"desc":"Swiss Army knife for pentesting networks."},
+    "bloodhound": {"url":"https://github.com/BloodHoundAD/BloodHound","examples":"bloodhound-python -d <domain> -u user -p pass -c All","desc":"Active Directory attack path mapping."},
+    "frida": {"url":"https://frida.re/","examples":["frida -U -f com.app -l script.js --no-pause","frida-trace -U -i 'open*'"],"desc":"Dynamic instrumentation toolkit."},
+    "jwt_tool": {"url":"https://github.com/ticarpi/jwt_tool","examples":["python3 jwt_tool.py <jwt> -X c","python3 jwt_tool.py <jwt> -I -hc kid -hv ' OR 1=1--"],"desc":"JWT testing and exploitation toolkit."},
+    "xsstrike": {"url":"https://github.com/s0md3v/XSStrike","examples":["python3 xsstrike.py -u '<url>'","python3 xsstrike.py -u '<url>' --fuzzer"],"desc":"Advanced XSS detection suite."},
+    "chisel": {"url":"https://github.com/jpillora/chisel","examples":["chisel server --reverse","chisel client <server:port> R:socks"],"desc":"Fast TCP/UDP tunnel over HTTP."},
+    "responder": {"url":"https://github.com/lgandx/Responder","examples":["sudo responder -I eth0 -wrf"],"desc":"LLMNR/NBT-NS poisoner and credential harvester."},
+    "setoolkit": {"url":"https://github.com/trustedsec/social-engineer-toolkit","examples":["sudo setoolkit"],"desc":"Social-Engineer Toolkit for phishing attacks."},
+    "linpeas": {"url":"https://github.com/peass-ng/PEASS-ng","examples":["./linpeas.sh","curl -L https://github.com/peass-ng/PEASS-ng/releases/latest/download/linpeas.sh | bash"],"desc":"Linux Privilege Escalation Awesome Script."},
+    "pacu": {"url":"https://github.com/RhinoSecurityLabs/pacu","examples":["python3 cli.py","run <module> --keyword-args {'region':'us-east-1'}"],"desc":"AWS exploitation framework."},
 }
 
 CATEGORIES = {
@@ -258,6 +268,20 @@ CATEGORIES = {
         "cowsay": {"wiki":"cowsay","desc":"Mascot utility"},
         "lolcat": {"wiki":"lolcat","desc":"Rainbow text output"},
     },
+    "Cloud & Post-Ex": {
+        "crackmapexec": {"wiki":"crackmapexec","desc":"Network pentesting Swiss Army knife"},
+        "bloodhound": {"wiki":"bloodhound","desc":"AD attack path mapping"},
+        "responder": {"wiki":"responder","desc":"LLMNR/NBT-NS poisoner"},
+        "chisel": {"wiki":"chisel","desc":"Fast TCP/UDP tunnel over HTTP"},
+        "linpeas": {"wiki":"linpeas","desc":"Linux PrivEsc enumeration"},
+        "pacu": {"wiki":"pacu","desc":"AWS exploitation framework"},
+    },
+    "Advanced Web": {
+        "jwt_tool": {"wiki":"jwt_tool","desc":"JWT testing and exploitation"},
+        "xsstrike": {"wiki":"xsstrike","desc":"Advanced XSS detection suite"},
+        "frida": {"wiki":"frida","desc":"Dynamic instrumentation toolkit"},
+        "setoolkit": {"wiki":"setoolkit","desc":"Social-Engineer Toolkit"},
+    },
 }
 
 TOOL_CMDS = {
@@ -296,6 +320,16 @@ TOOL_CMDS = {
     "tor":"sudo systemctl start tor",
     "seclists":"ls /usr/share/seclists","git-dumper":"git_dumper",
     "cowsay":"cowsay","lolcat":"lolcat",
+    "crackmapexec":"nxc",
+    "bloodhound":"bloodhound-python",
+    "frida":"frida",
+    "jwt_tool":"python3 jwt_tool.py",
+    "xsstrike":"python3 xsstrike.py",
+    "chisel":"chisel",
+    "responder":"sudo responder",
+    "setoolkit":"sudo setoolkit",
+    "linpeas":"./linpeas.sh",
+    "pacu":"python3 cli.py",
 }
 
 TOOL_CATEGORY = {}
