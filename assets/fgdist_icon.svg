@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0d1222"/>
+      <stop offset="100%" stop-color="#1b2240"/>
+    </linearGradient>
+    <linearGradient id="neon" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#00ff88"/>
+      <stop offset="100%" stop-color="#7dcfff"/>
+    </linearGradient>
+    <linearGradient id="pulse" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#bb9af7"/>
+      <stop offset="100%" stop-color="#00ff88"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="2.6" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- outer tile -->
+  <rect x="10" y="10" width="236" height="236" rx="44" fill="url(#bg)"/>
+  <rect x="10" y="10" width="236" height="236" rx="44" fill="none" stroke="#00ff88" stroke-opacity="0.45" stroke-width="6"/>
+
+  <!-- shield silhouette -->
+  <path d="M128 42l68 22v56c0 40-28 73-68 96-40-23-68-56-68-96V64z" fill="#0f172d" stroke="#7dcfff" stroke-opacity="0.45" stroke-width="4"/>
+
+  <!-- terminal window in shield -->
+  <rect x="76" y="86" width="104" height="72" rx="10" fill="#0a0f1d" stroke="url(#neon)" stroke-width="3" filter="url(#glow)"/>
+  <circle cx="90" cy="98" r="3" fill="#ff5370"/>
+  <circle cx="100" cy="98" r="3" fill="#f7c948"/>
+  <circle cx="110" cy="98" r="3" fill="#00ff88"/>
+
+  <!-- command prompt glyph -->
+  <path d="M94 118l12 10-12 10" fill="none" stroke="#7dcfff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="114" y="136" width="40" height="4" rx="2" fill="url(#pulse)"/>
+
+  <!-- subtle FG mark -->
+  <text x="128" y="185" text-anchor="middle" fill="#a5b4fc" font-family="JetBrains Mono, monospace" font-size="16" font-weight="bold">FG-D</text>
+</svg>

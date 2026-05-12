@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=FG-Dist Pentool beta
+Comment=Desktop Security Workbench
+Exec=/home/fabiandev/security/tools/pentest-ui/run_desktop.sh
+Path=/home/fabiandev/security/tools/pentest-ui
+Icon=/home/fabiandev/security/tools/pentest-ui/assets/fgdist_icon_minimal.svg
+Terminal=false
+Categories=Development;Security;Utility;
+StartupNotify=true
