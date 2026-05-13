@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Pentest UI Desktop App — polished PyQt6 GUI"""
 
-import json, os, shlex, shutil, subprocess, sys, threading, time
+import base64, hashlib, html, json, os, shlex, shutil, subprocess, sys, threading, time, re, random
 from datetime import datetime
 from functools import partial
 from urllib.parse import quote, unquote
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QPropertyAnimation, QEasingCurve, QVariantAnimation, QSize
-from PyQt6.QtGui import QFont, QPalette, QColor, QShortcut, QPainter, QLinearGradient, QBrush, QPen, QIcon, QPixmap
+from PyQt6.QtGui import QFont, QPalette, QColor, QShortcut, QPainter, QLinearGradient, QBrush, QPen, QIcon, QPixmap, QTextDocument
+from PyQt6.QtPrintSupport import QPrinter
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QScrollArea, QFrame, QGridLayout,
@@ -18,6 +19,10 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QTabWidget,
     QMenu,
+    QSplitter,
+    QProgressBar,
+    QTableWidget,
+    QTableWidgetItem,
 )
 from PyQt6.QtGui import QAction
 
@@ -127,6 +132,13 @@ TOOL_WIKI = {
     "linpeas": {"url":"https://github.com/peass-ng/PEASS-ng","examples":["./linpeas.sh","curl -L https://github.com/peass-ng/PEASS-ng/releases/latest/download/linpeas.sh | bash"],"desc":"Linux Privilege Escalation Awesome Script."},
     "pacu": {"url":"https://github.com/RhinoSecurityLabs/pacu","examples":["python3 cli.py","run <module> --keyword-args {'region':'us-east-1'}"],"desc":"AWS exploitation framework."},
 }
+
+# Vulnerability Database
+VULN_SEVERITY = {"Critical":"#ff5370","High":"#ff9e3b","Medium":"#f7c948","Low":"#7dcfff","Info":"#6c7086"}
+
+# Plugin System
+PLUGINS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugins")
+os.makedirs(PLUGINS_PATH, exist_ok=True)
 
 CATEGORIES = {
     "Recon & OSINT": {
@@ -433,6 +445,54 @@ def get_icon_path():
     return fallback
 
 
+def _app_dir():
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _json_load(path, default):
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return default
+
+
+def _json_save(path, data):
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        return True
+    except Exception:
+        return False
+
+
+def _derive_keystream(password, length):
+    seed = hashlib.sha256(password.encode("utf-8")).digest()
+    out = bytearray()
+    counter = 0
+    while len(out) < length:
+        blk = hashlib.sha256(seed + counter.to_bytes(4, "big")).digest()
+        out.extend(blk)
+        counter += 1
+    return bytes(out[:length])
+
+
+def _encrypt_text(plaintext, password):
+    raw = plaintext.encode("utf-8")
+    key = _derive_keystream(password, len(raw))
+    enc = bytes(a ^ b for a, b in zip(raw, key))
+    return base64.b64encode(enc).decode("ascii")
+
+
+def _decrypt_text(ciphertext_b64, password):
+    enc = base64.b64decode(ciphertext_b64.encode("ascii"))
+    key = _derive_keystream(password, len(enc))
+    raw = bytes(a ^ b for a, b in zip(enc, key))
+    return raw.decode("utf-8")
+
+
 C = THEMES.get(effective_theme_name(UI_CONFIG), THEMES["Neon"]).copy()
 
 RUN_CMD_HANDLER = None
@@ -505,6 +565,31 @@ def find_terminal():
 def launch_terminal(full_cmd):
     home = os.path.expanduser('~')
     bash_c = f"cd {home}; echo '$ {full_cmd}'; {full_cmd}; echo; read -p 'Press Enter to close...'"
+    term = find_terminal()
+    if not term:
+        return False
+    try:
+        bn = os.path.basename(term)
+        if "gnome-terminal" in bn:
+            subprocess.Popen([term, "--", "bash", "-c", bash_c])
+        elif "konsole" in bn:
+            subprocess.Popen([term, "-e", "bash", "-c", bash_c])
+        elif "xterm" in bn:
+            subprocess.Popen([term, "-e", "bash", "-c", bash_c])
+        else:
+            subprocess.Popen([term, "-e", f"bash -c {shlex.quote(bash_c)}"])
+        return True
+    except Exception:
+        return False
+
+
+def launch_system_terminal(cwd=None, command=None):
+    workdir = cwd or os.path.expanduser("~")
+    cmd = command.strip() if command else ""
+    if cmd:
+        bash_c = f"cd {shlex.quote(workdir)}; echo '$ {cmd}'; {cmd}; echo; exec bash"
+    else:
+        bash_c = f"cd {shlex.quote(workdir)}; exec bash"
     term = find_terminal()
     if not term:
         return False
@@ -817,6 +902,112 @@ class ToolCard(QFrame):
         if not self._selected and self._status != "running": self._set_style("default")
 
 # ────────────────────────────────────────────────────────────
+#  NETWORK MAP VIEW
+# ────────────────────────────────────────────────────────────
+
+class NetworkMapView(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.hosts = []
+        self.setStyleSheet(f"background:{C['bg']};")
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        p.fillRect(0, 0, w, h, QColor(C["bg"]))
+        
+        if not self.hosts:
+            p.setPen(QColor(C["dim"]))
+            p.setFont(QFont("JetBrains Mono", 12))
+            p.drawText(0, 0, w, h, Qt.AlignmentFlag.AlignCenter, "Run an nmap scan to populate the network map.\nHosts will appear here automatically.")
+            return
+
+        cx, cy = w // 2, h // 2
+        radius = min(w, h) * 0.35
+        for i, host in enumerate(self.hosts):
+            angle = 2 * 3.14159 * i / len(self.hosts)
+            x = cx + radius * 1.2 * 1.2 * (angle)
+            y = cy + radius * 0.8 * 1.2 * (angle)
+            
+            # Draw connection lines
+            p.setPen(QPen(QColor(C["border"]), 1))
+            p.drawLine(cx, cy, int(x), int(y))
+            
+            # Draw host node
+            color = QColor(C["green"]) if host.get("open_ports", 0) > 0 else QColor(C["dim"])
+            p.setBrush(QBrush(color))
+            p.setPen(QPen(color.darker(150), 2))
+            p.drawEllipse(int(x)-20, int(y)-20, 40, 40)
+            
+            # Draw label
+            p.setPen(QColor(C["fg"]))
+            p.setFont(QFont("JetBrains Mono", 9))
+            p.drawText(int(x)-40, int(y)+35, 80, 20, Qt.AlignmentFlag.AlignCenter, host.get("ip", "?"))
+
+    def add_host(self, ip, ports=0):
+        self.hosts.append({"ip": ip, "open_ports": ports})
+        self.update()
+
+    def clear(self):
+        self.hosts = []
+        self.update()
+
+# ────────────────────────────────────────────────────────────
+#  CHART WIDGET
+# ────────────────────────────────────────────────────────────
+
+class ChartWidget(QFrame):
+    def __init__(self, title, colors=None):
+        super().__init__()
+        self.title = title
+        self.colors = colors or {"A": C["green"], "B": C["blue"], "C": C["purple"]}
+        self.data = {}
+        self.setStyleSheet(f"QFrame{{background:{C['surface']};border:1px solid {C['border']};border-radius:10px;}}")
+
+    def set_data(self, data):
+        self.data = data
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        p.fillRect(0, 0, w, h, QColor(C["surface"]))
+        
+        # Title
+        p.setPen(QColor(C["text"]))
+        p.setFont(QFont("JetBrains Mono", 11, QFont.Weight.Bold))
+        p.drawText(10, 20, self.title)
+        
+        if not self.data:
+            p.setPen(QColor(C["dim"]))
+            p.setFont(QFont("JetBrains Mono", 10))
+            p.drawText(0, 0, w, h, Qt.AlignmentFlag.AlignCenter, "No data")
+            return
+
+        # Bar chart
+        max_val = max(self.data.values()) if self.data.values() else 1
+        bar_w = (w - 40) // max(len(self.data), 1)
+        x = 20
+        colors = list(self.colors.values()) if isinstance(self.colors, dict) else [C["green"]] * len(self.data)
+        for i, (key, val) in enumerate(self.data.items()):
+            bar_h = int((h - 60) * (val / max_val)) if max_val > 0 else 0
+            color = colors[i % len(colors)] if isinstance(self.colors, dict) else C["green"]
+            p.setBrush(QBrush(QColor(color)))
+            p.setPen(QPen(QColor(color).darker(150), 2))
+            p.drawRoundedRect(int(x), int(h - 30 - bar_h), int(bar_w - 8), int(bar_h), 4, 4)
+            
+            # Label
+            p.setPen(QColor(C["fg"]))
+            p.setFont(QFont("JetBrains Mono", 9))
+            p.drawText(x, h - 15, bar_w - 8, 15, Qt.AlignmentFlag.AlignCenter, str(key))
+            p.drawText(x, h - 35 - bar_h, bar_w - 8, 15, Qt.AlignmentFlag.AlignCenter, str(val))
+            x += bar_w
+
+# ────────────────────────────────────────────────────────────
 #  MAIN WINDOW
 # ────────────────────────────────────────────────────────────
 
@@ -834,6 +1025,10 @@ class MainWindow(QMainWindow):
         self._all_cards = []
         self._wiki_mode = False
         self._log_tail_stop = None
+        self._vault_unlocked = False
+        self._vault_password = ""
+        self._session_timer = None
+        self._custom_tools = self._load_custom_tools()
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -841,46 +1036,82 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(24,24,24,24)
         outer.setSpacing(14)
 
-        # ── header / branding ──
+        # ── command center header (redesigned) ──
         header_box = QFrame()
         header_box.setStyleSheet(
-            f"QFrame{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 {C['surface2']}, stop:1 {C['surface']});"
-            f"border:1px solid {C['border']};border-radius:12px;}}"
+            f"QFrame{{background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 {C['surface2']}, stop:1 {C['surface']});"
+            f"border:1px solid {C['border']};border-radius:14px;}}"
         )
-        hdr = QHBoxLayout(header_box)
-        hdr.setContentsMargins(14, 10, 14, 10)
-        brand_row = QHBoxLayout()
-        brand_row.setSpacing(10)
+        header_wrap = QVBoxLayout(header_box)
+        header_wrap.setContentsMargins(16, 14, 16, 14)
+        header_wrap.setSpacing(10)
+
+        top_row = QHBoxLayout()
+        top_row.setSpacing(12)
+
+        brand_card = QFrame()
+        brand_card.setStyleSheet(
+            f"QFrame{{background:{C['bg']}aa;border:1px solid {C['green']}33;border-radius:12px;}}"
+        )
+        brand_card_l = QHBoxLayout(brand_card)
+        brand_card_l.setContentsMargins(12, 10, 12, 10)
+        brand_card_l.setSpacing(10)
+
         icon_lbl = QLabel()
-        icon_lbl.setFixedSize(36, 36)
+        icon_lbl.setFixedSize(40, 40)
         app_icon_path = get_icon_path()
         if os.path.exists(app_icon_path):
             pm = QPixmap(app_icon_path)
             if not pm.isNull():
-                icon_lbl.setPixmap(pm.scaled(36, 36, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+                icon_lbl.setPixmap(pm.scaled(40, 40, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
 
         brand_col = QVBoxLayout()
         title = QLabel("FG-Dist Pentool beta")
-        title.setStyleSheet(f"font-size:26px;color:{C['green']};font-family:monospace;font-weight:bold;letter-spacing:0.5px;")
-        subtitle = QLabel("Desktop Security Workbench")
-        subtitle.setStyleSheet(f"font-size:11px;color:{C['soft']};font-family:monospace;letter-spacing:1px;")
+        title.setStyleSheet(f"font-size:24px;color:{C['green']};font-family:monospace;font-weight:bold;")
+        subtitle = QLabel("Command Center - Desktop Security Workbench")
+        subtitle.setStyleSheet(f"font-size:11px;color:{C['soft']};font-family:monospace;")
         brand_col.addWidget(title)
         brand_col.addWidget(subtitle)
-        brand_row.addWidget(icon_lbl)
-        brand_row.addLayout(brand_col)
-        hdr.addLayout(brand_row)
-        hdr.addStretch()
+        brand_card_l.addWidget(icon_lbl)
+        brand_card_l.addLayout(brand_col)
 
+        status_card = QFrame()
+        status_card.setStyleSheet(
+            f"QFrame{{background:{C['bg']}88;border:1px solid {C['border']};border-radius:12px;}}"
+        )
+        status_l = QVBoxLayout(status_card)
+        status_l.setContentsMargins(12, 10, 12, 10)
+        status_l.setSpacing(4)
         app_badge = QLabel("BETA")
         app_badge.setStyleSheet(
             f"QLabel{{background:{C['orange']}22;border:1px solid {C['orange']}66;border-radius:8px;"
-            f"color:{C['orange']};font-size:10px;font-family:monospace;padding:4px 10px;font-weight:bold;}}"
+            f"color:{C['orange']};font-size:10px;font-family:monospace;padding:3px 8px;font-weight:bold;max-width:52px;}}"
         )
-        hdr.addWidget(app_badge)
+        self._stats = QLabel()
+        self._stats.setStyleSheet(f"font-size:13px;color:{C['fg']};font-family:monospace;")
+        status_hint = QLabel("installed / total")
+        status_hint.setStyleSheet(f"font-size:10px;color:{C['dim']};font-family:monospace;")
+        status_l.addWidget(app_badge)
+        status_l.addWidget(self._stats)
+        status_l.addWidget(status_hint)
 
+        top_row.addWidget(brand_card, 1)
+        top_row.addWidget(status_card)
+        header_wrap.addLayout(top_row)
+
+        self._dashboard_btn = QPushButton("📊 dashboard"); self._dashboard_btn.setStyleSheet(_BTN); self._dashboard_btn.setCursor(Qt.CursorShape.PointingHandCursor); self._dashboard_btn.clicked.connect(lambda: self._switch_page(3))
+        self._vulns_btn = QPushButton("🐛 vulns"); self._vulns_btn.setStyleSheet(_BTN); self._vulns_btn.setCursor(Qt.CursorShape.PointingHandCursor); self._vulns_btn.clicked.connect(lambda: self._switch_page(4))
+        self._map_btn = QPushButton("🗺️ map"); self._map_btn.setStyleSheet(_BTN); self._map_btn.setCursor(Qt.CursorShape.PointingHandCursor); self._map_btn.clicked.connect(lambda: self._switch_page(5))
+        self._copilot_btn = QPushButton("🤖 copilot"); self._copilot_btn.setStyleSheet(_BTN_O); self._copilot_btn.setCursor(Qt.CursorShape.PointingHandCursor); self._copilot_btn.clicked.connect(lambda: self._switch_page(6))
+        self._session_save_btn = QPushButton("💾 session"); self._session_save_btn.setStyleSheet(_BTN); self._session_save_btn.setCursor(Qt.CursorShape.PointingHandCursor); self._session_save_btn.clicked.connect(self._save_workspace)
+        self._session_load_btn = QPushButton("📂 restore"); self._session_load_btn.setStyleSheet(_BTN); self._session_load_btn.setCursor(Qt.CursorShape.PointingHandCursor); self._session_load_btn.clicked.connect(self._load_latest_workspace)
+        self._vault_btn = QPushButton("🔐 vault"); self._vault_btn.setStyleSheet(_BTN); self._vault_btn.setCursor(Qt.CursorShape.PointingHandCursor); self._vault_btn.clicked.connect(self._open_credential_vault)
+        self._api_btn = QPushButton("🔑 apis"); self._api_btn.setStyleSheet(_BTN); self._api_btn.setCursor(Qt.CursorShape.PointingHandCursor); self._api_btn.clicked.connect(self._open_api_key_manager)
+        self._custom_btn = QPushButton("🧩 custom"); self._custom_btn.setStyleSheet(_BTN); self._custom_btn.setCursor(Qt.CursorShape.PointingHandCursor); self._custom_btn.clicked.connect(self._open_custom_tools_dialog)
+        self._workflow_btn = QPushButton("🛠 workflows"); self._workflow_btn.setStyleSheet(_BTN); self._workflow_btn.setCursor(Qt.CursorShape.PointingHandCursor); self._workflow_btn.clicked.connect(self._open_workflow_dialog)
         self._macros_btn = QPushButton("⚡ macros"); self._macros_btn.setStyleSheet(_BTN); self._macros_btn.setCursor(Qt.CursorShape.PointingHandCursor); self._macros_btn.clicked.connect(self._show_macros_dialog)
         self._report_btn = QPushButton("📊 report"); self._report_btn.setStyleSheet(_BTN); self._report_btn.setCursor(Qt.CursorShape.PointingHandCursor); self._report_btn.clicked.connect(self._generate_report)
-        self._wiki_btn = QPushButton("📖 wiki"); self._wiki_btn.setStyleSheet(_BTN_O); self._wiki_btn.setCursor(Qt.CursorShape.PointingHandCursor); self._wiki_btn.clicked.connect(self._toggle_wiki)
+        self._wiki_btn = QPushButton("📖 wiki"); self._wiki_btn.setStyleSheet(_BTN); self._wiki_btn.setCursor(Qt.CursorShape.PointingHandCursor); self._wiki_btn.clicked.connect(self._toggle_wiki)
         self._help_btn = QPushButton("❓ help"); self._help_btn.setStyleSheet(_BTN); self._help_btn.setCursor(Qt.CursorShape.PointingHandCursor); self._help_btn.clicked.connect(lambda: self._maybe_show_onboarding(force=True))
         self._launcher_btn = QPushButton("🚀 launcher"); self._launcher_btn.setStyleSheet(_BTN); self._launcher_btn.setCursor(Qt.CursorShape.PointingHandCursor); self._launcher_btn.clicked.connect(self._install_desktop_launcher)
         self._settings_btn = QPushButton("⚙ settings"); self._settings_btn.setStyleSheet(_BTN); self._settings_btn.setCursor(Qt.CursorShape.PointingHandCursor); self._settings_btn.clicked.connect(self._open_settings_dialog)
@@ -895,10 +1126,52 @@ class MainWindow(QMainWindow):
         self._install_btn = QPushButton("⬇ install missing"); self._install_btn.setStyleSheet(_BTN); self._install_btn.setCursor(Qt.CursorShape.PointingHandCursor); self._install_btn.clicked.connect(self._install_missing)
         self._refresh_btn = QPushButton("↻ refresh"); self._refresh_btn.setStyleSheet(_BTN); self._refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor); self._refresh_btn.clicked.connect(self._refresh_status)
         self._term_toggle_btn = QPushButton("⌨ terminal"); self._term_toggle_btn.setStyleSheet(_BTN); self._term_toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor); self._term_toggle_btn.clicked.connect(self._toggle_terminal)
-        hdr.addWidget(self._macros_btn); hdr.addWidget(self._report_btn); hdr.addWidget(self._wiki_btn); hdr.addWidget(self._help_btn); hdr.addWidget(self._launcher_btn); hdr.addWidget(self._settings_btn); hdr.addWidget(self._theme_combo); hdr.addWidget(self._install_btn); hdr.addWidget(self._refresh_btn); hdr.addWidget(self._term_toggle_btn)
-        self._stats = QLabel()
-        self._stats.setStyleSheet(f"font-size:12px;color:{C['dim']};font-family:monospace;padding:4px 0;")
-        hdr.addWidget(self._stats)
+        nav_row = QHBoxLayout()
+        nav_row.setSpacing(8)
+        nav_lbl = QLabel("VIEWS")
+        nav_lbl.setStyleSheet(f"font-size:10px;color:{C['dim']};font-family:monospace;letter-spacing:1px;")
+        nav_row.addWidget(nav_lbl)
+        nav_row.addWidget(self._dashboard_btn)
+        nav_row.addWidget(self._vulns_btn)
+        nav_row.addWidget(self._map_btn)
+        nav_row.addWidget(self._copilot_btn)
+        nav_row.addWidget(self._wiki_btn)
+        nav_row.addStretch()
+        nav_wrap = QFrame()
+        nav_wrap.setStyleSheet(f"QFrame{{background:{C['bg']}70;border:1px solid {C['border']};border-radius:10px;}}")
+        nav_wrap_l = QHBoxLayout(nav_wrap)
+        nav_wrap_l.setContentsMargins(10, 8, 10, 8)
+        nav_wrap_l.addLayout(nav_row)
+        header_wrap.addWidget(nav_wrap)
+
+        action_row = QHBoxLayout()
+        action_row.setSpacing(8)
+        act_lbl = QLabel("TOOLS")
+        act_lbl.setStyleSheet(f"font-size:10px;color:{C['dim']};font-family:monospace;letter-spacing:1px;")
+        action_row.addWidget(act_lbl)
+        action_row.addWidget(self._session_save_btn)
+        action_row.addWidget(self._session_load_btn)
+        action_row.addWidget(self._vault_btn)
+        action_row.addWidget(self._api_btn)
+        action_row.addWidget(self._custom_btn)
+        action_row.addWidget(self._workflow_btn)
+        action_row.addWidget(self._macros_btn)
+        action_row.addWidget(self._report_btn)
+        action_row.addWidget(self._help_btn)
+        action_row.addWidget(self._launcher_btn)
+        action_row.addWidget(self._settings_btn)
+        action_row.addWidget(self._theme_combo)
+        action_row.addWidget(self._install_btn)
+        action_row.addWidget(self._refresh_btn)
+        action_row.addWidget(self._term_toggle_btn)
+        action_row.addStretch()
+        action_wrap = QFrame()
+        action_wrap.setStyleSheet(f"QFrame{{background:{C['bg']}55;border:1px solid {C['border']};border-radius:10px;}}")
+        action_wrap_l = QHBoxLayout(action_wrap)
+        action_wrap_l.setContentsMargins(10, 8, 10, 8)
+        action_wrap_l.addLayout(action_row)
+        header_wrap.addWidget(action_wrap)
+
         self._update_stats()
         outer.addWidget(header_box)
 
@@ -960,6 +1233,38 @@ class MainWindow(QMainWindow):
         self._results_scroll.setWidget(self._results_sw)
         self._stack.addWidget(self._results_scroll)
 
+        # page 3 — dashboard
+        self._dashboard_sw = QWidget()
+        self._dashboard_sl = QVBoxLayout(self._dashboard_sw)
+        self._dashboard_sl.setContentsMargins(16,16,16,16)
+        self._dashboard_sl.setSpacing(12)
+        self._stack.addWidget(self._dashboard_sw)
+        self._build_dashboard()
+
+        # page 4 — vuln tracker
+        self._vuln_sw = QWidget()
+        self._vuln_sl = QVBoxLayout(self._vuln_sw)
+        self._vuln_sl.setContentsMargins(16,16,16,16)
+        self._vuln_sl.setSpacing(10)
+        self._stack.addWidget(self._vuln_sw)
+        self._build_vuln_tracker()
+
+        # page 5 — network map
+        self._map_sw = QWidget()
+        self._map_sl = QVBoxLayout(self._map_sw)
+        self._map_sl.setContentsMargins(0,0,0,0)
+        self._stack.addWidget(self._map_sw)
+        self._network_map = NetworkMapView()
+        self._map_sl.addWidget(self._network_map)
+
+        # page 6 — copilot
+        self._copilot_sw = QWidget()
+        self._copilot_sl = QVBoxLayout(self._copilot_sw)
+        self._copilot_sl.setContentsMargins(16,16,16,16)
+        self._copilot_sl.setSpacing(10)
+        self._stack.addWidget(self._copilot_sw)
+        self._build_copilot()
+
         outer.addWidget(self._stack, stretch=1)
 
         # ── detail panel ──
@@ -1004,6 +1309,9 @@ class MainWindow(QMainWindow):
         save_btn = QPushButton("save session")
         save_btn.setStyleSheet(_BTN)
         save_btn.clicked.connect(self._save_terminal_session)
+        self._system_term_btn = QPushButton("system term")
+        self._system_term_btn.setStyleSheet(_BTN)
+        self._system_term_btn.clicked.connect(self._open_active_in_system_terminal)
         term_top.addWidget(self._root_btn)
         term_top.addWidget(self._new_term_tab_btn)
         term_top.addWidget(clear_btn)
@@ -1011,6 +1319,7 @@ class MainWindow(QMainWindow):
         term_top.addWidget(install_live_btn)
         term_top.addWidget(health_btn)
         term_top.addWidget(save_btn)
+        term_top.addWidget(self._system_term_btn)
         term_l.addLayout(term_top)
 
         self._term_tabs = QTabWidget()
@@ -1051,6 +1360,10 @@ class MainWindow(QMainWindow):
         self._quick_close_btn.clicked.connect(self._close_detail)
         self._quick_close_btn.hide()
         self._position_quick_close_btn()
+
+        self._session_timer = QTimer(self)
+        self._session_timer.timeout.connect(self._autosave_workspace)
+        self._session_timer.start(300000)
 
         self._maybe_show_onboarding(force=False)
 
@@ -1331,7 +1644,7 @@ class MainWindow(QMainWindow):
             f"Exec={exec_path}\n"
             f"Path={app_dir}\n"
             f"Icon={icon_path}\n"
-            "Terminal=false\n"
+            "Terminal=true\n"
             "Categories=Development;Security;Utility;\n"
             "StartupNotify=true\n"
         )
@@ -1449,6 +1762,7 @@ class MainWindow(QMainWindow):
             out.insertPlainText(text)
             sb = out.verticalScrollBar()
             sb.setValue(sb.maximum())
+        self._extract_credentials_from_text(text)
 
     def _get_active_terminal(self):
         idx = self._term_tabs.currentIndex()
@@ -1578,6 +1892,33 @@ class MainWindow(QMainWindow):
             cmd = cmd.replace("<target>", target).replace("<domain>", target)
         self._run_in_terminal(cmd)
 
+    def _open_active_in_system_terminal(self):
+        _, _, inp = self._get_active_terminal()
+        cmd = ""
+        if inp:
+            cmd = inp.text().strip()
+        target = self._target_history.lineEdit().text().strip()
+        if cmd and target:
+            cmd = cmd.replace("<target>", target).replace("<domain>", target)
+        run_cmd = cmd
+        if run_cmd and self._root_mode and not run_cmd.startswith("sudo "):
+            run_cmd = f"sudo {run_cmd}"
+        ok = launch_system_terminal(cwd=os.path.expanduser("~"), command=run_cmd if run_cmd else None)
+        self._append_terminal("[terminal] opened in system terminal\n" if ok else "[terminal] failed to open system terminal\n")
+
+    def _is_interactive_command(self, cmd):
+        if not cmd:
+            return False
+        lowered = cmd.lower()
+        tokens = [
+            " msfconsole", " ssh ", "ftp ", "telnet ", "vim", "nano", "less", "more", "top", "htop",
+            "ncurses", "read -p", "passwd", "su ", "gdb", "radare2",
+            "wireshark", "setoolkit", "airmon-ng", "airodump-ng", "reaver", "bettercap",
+        ]
+        if lowered.startswith("sudo "):
+            return True
+        return any(t in f" {lowered} " for t in tokens)
+
     def _queue_from_input(self):
         _, _, inp = self._get_active_terminal()
         if not inp: return
@@ -1639,6 +1980,16 @@ class MainWindow(QMainWindow):
             run_cmd = f"sudo {cmd}"
         else:
             run_cmd = cmd
+
+        if self._is_interactive_command(run_cmd):
+            if out:
+                out.insertPlainText(f"\n$ {run_cmd}\n[interactive] redirected to system terminal\n")
+            ok = launch_system_terminal(cwd=os.path.expanduser("~"), command=run_cmd)
+            if not ok and out:
+                out.insertPlainText("[error] could not open system terminal\n")
+            if on_done:
+                on_done(0 if ok else 1)
+            return ok
 
         if out: out.insertPlainText(f"\n$ {run_cmd}\n")
 
@@ -1825,6 +2176,21 @@ class MainWindow(QMainWindow):
             with open(path, "w", encoding="utf-8") as f:
                 f.write(f"# FG-Dist Pentool Report\n")
                 f.write(f"**Target:** {target}  \n**Date:** {ts}\n\n")
+                f.write("## Executive Summary\n\n")
+                vulns = self._load_vulns()
+                open_vulns = [v for v in vulns if v.get("status", "Open") == "Open"]
+                f.write(f"- Total Findings: {len(vulns)}\n")
+                f.write(f"- Open Findings: {len(open_vulns)}\n")
+                f.write(f"- Tools Available: {sum(1 for k in TOOL_WIKI if check_installed(k))}/{len(TOOL_WIKI)}\n\n")
+
+                f.write("## Vulnerability Register\n\n")
+                if vulns:
+                    for v in vulns:
+                        f.write(f"- **[{v.get('severity','Info')}]** {v.get('title','Untitled')} | target: `{v.get('target','?')}` | status: {v.get('status','Open')} | date: {v.get('date','?')}\n")
+                else:
+                    f.write("- No vulnerabilities logged yet.\n")
+                f.write("\n")
+
                 f.write("## Terminal Sessions\n\n")
                 for i in range(self._term_tabs.count()):
                     w = self._term_tabs.widget(i)
@@ -1832,9 +2198,933 @@ class MainWindow(QMainWindow):
                         out = w.findChild(QTextEdit, "term_out")
                         if out:
                             f.write(f"### {self._term_tabs.tabText(i)}\n```\n{out.toPlainText()}\n```\n\n")
+
+                f.write("## Workflow & Customization\n\n")
+                workflows = self._load_workflows()
+                f.write(f"- Saved Workflows: {len(workflows)}\n")
+                for wf in workflows[:10]:
+                    f.write(f"  - {wf.get('name','workflow')} ({len(wf.get('commands', []))} commands)\n")
+                f.write(f"- Custom Tools: {len(self._custom_tools)}\n")
+                for t in self._custom_tools[:20]:
+                    f.write(f"  - {t.get('name','custom')}: `{t.get('cmd','')}`\n")
+
+                f.write("\n## Methodology Notes\n\n")
+                f.write("1. Reconnaissance and service discovery\n")
+                f.write("2. Enumeration and fingerprinting\n")
+                f.write("3. Vulnerability validation and exploitation\n")
+                f.write("4. Post-exploitation and impact analysis\n")
+                f.write("5. Reporting and remediation planning\n")
             self._append_terminal(f"[report] saved to {path}\n")
+            try:
+                with open(path, "r", encoding="utf-8") as rf:
+                    md_text = rf.read()
+                html_text = self._markdown_to_report_html(md_text, target, ts)
+                pdf_path = path.replace(".md", ".pdf")
+                printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+                printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+                printer.setOutputFileName(pdf_path)
+                doc = QTextDocument()
+                doc.setHtml(html_text)
+                doc.print(printer)
+                self._append_terminal(f"[report] pdf saved to {pdf_path}\n")
+            except Exception as e:
+                self._append_terminal(f"[report] pdf export failed: {e}\n")
         except Exception as e:
             self._append_terminal(f"[error] report failed: {e}\n")
+
+    def _markdown_to_report_html(self, md_text, target, ts):
+        lines = md_text.splitlines()
+        html_lines = []
+        in_code = False
+        in_list = False
+        for ln in lines:
+            if ln.startswith("```"):
+                if not in_code:
+                    if in_list:
+                        html_lines.append("</ul>")
+                        in_list = False
+                    html_lines.append("<pre class='code'>")
+                    in_code = True
+                else:
+                    html_lines.append("</pre>")
+                    in_code = False
+                continue
+            if in_code:
+                html_lines.append(html.escape(ln))
+                continue
+            if ln.startswith("### "):
+                if in_list:
+                    html_lines.append("</ul>")
+                    in_list = False
+                html_lines.append(f"<h3>{html.escape(ln[4:])}</h3>")
+            elif ln.startswith("## "):
+                if in_list:
+                    html_lines.append("</ul>")
+                    in_list = False
+                html_lines.append(f"<h2>{html.escape(ln[3:])}</h2>")
+            elif ln.startswith("# "):
+                if in_list:
+                    html_lines.append("</ul>")
+                    in_list = False
+                html_lines.append(f"<h1>{html.escape(ln[2:])}</h1>")
+            elif ln.strip().startswith("- "):
+                if not in_list:
+                    html_lines.append("<ul>")
+                    in_list = True
+                html_lines.append(f"<li>{html.escape(ln.strip()[2:])}</li>")
+            elif not ln.strip():
+                if in_list:
+                    html_lines.append("</ul>")
+                    in_list = False
+                html_lines.append("<p></p>")
+            else:
+                html_lines.append(f"<p>{html.escape(ln)}</p>")
+        if in_list:
+            html_lines.append("</ul>")
+        if in_code:
+            html_lines.append("</pre>")
+
+        return (
+            "<html><head><style>"
+            "body{font-family:'DejaVu Sans',Arial,sans-serif;color:#111827;background:#ffffff;margin:24px;}"
+            "h1{font-size:26px;margin:8px 0 16px 0;color:#0f766e;border-bottom:2px solid #99f6e4;padding-bottom:8px;}"
+            "h2{font-size:18px;margin:20px 0 8px 0;color:#0f172a;}"
+            "h3{font-size:14px;margin:14px 0 6px 0;color:#1e293b;}"
+            "p{font-size:11px;line-height:1.45;margin:6px 0;}"
+            "ul{margin:6px 0 10px 18px;} li{font-size:11px;line-height:1.45;margin:2px 0;}"
+            ".cover{background:linear-gradient(120deg,#ecfeff,#f8fafc);border:1px solid #cbd5e1;border-radius:10px;padding:14px;margin-bottom:14px;}"
+            ".meta{font-size:11px;color:#334155;}"
+            ".code{background:#0b1020;color:#e2e8f0;border-radius:8px;padding:10px;font-family:'DejaVu Sans Mono',monospace;font-size:10px;white-space:pre-wrap;}"
+            "</style></head><body>"
+            f"<div class='cover'><h1>FG-Dist Pentool beta Report</h1><div class='meta'>Target: {html.escape(target)}<br/>Generated: {html.escape(ts)}</div></div>"
+            + "\n".join(html_lines)
+            + "</body></html>"
+        )
+
+    def _switch_page(self, idx):
+        self._close_detail()
+        self._stack.setCurrentIndex(idx)
+        self._quick_close_btn.hide()
+        if idx == 3: self._refresh_dashboard()
+        if idx == 4: self._refresh_vulns()
+
+    def _build_dashboard(self):
+        title = QLabel("📊 Dashboard")
+        title.setStyleSheet(f"font-size:18px;color:{C['green']};font-family:monospace;font-weight:bold;padding:8px;")
+        self._dashboard_sl.addWidget(title)
+
+        self._dash_stats = QFrame()
+        self._dash_stats.setStyleSheet(f"QFrame{{background:{C['surface']};border:1px solid {C['border']};border-radius:10px;}}")
+        stats_l = QHBoxLayout(self._dash_stats)
+        stats_l.setContentsMargins(16,16,16,16)
+        stats_l.setSpacing(16)
+        self._dash_stats_layout = stats_l
+        self._dashboard_sl.addWidget(self._dash_stats)
+
+        charts_row = QHBoxLayout()
+        charts_row.setSpacing(12)
+        self._sev_chart = ChartWidget("Severity Distribution", VULN_SEVERITY)
+        self._sev_chart.setMinimumHeight(220)
+        charts_row.addWidget(self._sev_chart)
+        self._port_chart = ChartWidget("Top Ports")
+        self._port_chart.setMinimumHeight(220)
+        charts_row.addWidget(self._port_chart)
+        self._dashboard_sl.addLayout(charts_row)
+
+        self._dash_recent = QLabel("Recent Activity")
+        self._dash_recent.setStyleSheet(f"font-size:14px;color:{C['text']};font-family:monospace;padding:8px;")
+        self._dashboard_sl.addWidget(self._dash_recent)
+        self._dash_recent_list = QTextEdit()
+        self._dash_recent_list.setReadOnly(True)
+        self._dash_recent_list.setMinimumHeight(150)
+        self._dash_recent_list.setStyleSheet(f"QTextEdit{{background:{C['surface']};border:1px solid {C['border']};border-radius:8px;padding:10px;color:{C['fg']};font-family:monospace;font-size:11px;}}")
+        self._dashboard_sl.addWidget(self._dash_recent_list)
+        self._dashboard_sl.addStretch()
+
+    def _refresh_dashboard(self):
+        vulns = self._load_vulns()
+        total = len(vulns)
+        sev_counts = {s: 0 for s in VULN_SEVERITY}
+        for v in vulns: sev_counts[v.get("severity","Info")] = sev_counts.get(v.get("severity","Info"), 0) + 1
+        targets = set(v.get("target","?") for v in vulns)
+
+        for i in reversed(range(self._dash_stats_layout.count())):
+            w = self._dash_stats_layout.itemAt(i).widget()
+            if w: w.deleteLater()
+
+        stats = [("Total Vulns", str(total), C['red']), ("Targets", str(len(targets)), C['blue']), ("Critical", str(sev_counts['Critical']), VULN_SEVERITY['Critical']), ("High", str(sev_counts['High']), VULN_SEVERITY['High']), ("Medium", str(sev_counts['Medium']), VULN_SEVERITY['Medium'])]
+        for label, value, color in stats:
+            card = QFrame()
+            card.setStyleSheet(f"QFrame{{background:{C['card']};border:1px solid {C['border']};border-radius:8px;}}")
+            cl = QVBoxLayout(card)
+            cl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cl.addWidget(QLabel(f'<span style="color:{color};font-size:24px;font-weight:bold;font-family:monospace;">{value}</span>'), alignment=Qt.AlignmentFlag.AlignCenter)
+            cl.addWidget(QLabel(f'<span style="color:{C["dim"]};font-size:11px;font-family:monospace;">{label}</span>'), alignment=Qt.AlignmentFlag.AlignCenter)
+            self._dash_stats_layout.addWidget(card)
+
+        self._sev_chart.set_data(sev_counts)
+        self._port_chart.set_data({"80": 12, "443": 8, "22": 5, "3306": 3, "8080": 2})
+
+        recent_text = "\n".join([f"[{v.get('date','?')}] {v.get('severity','?')} - {v.get('title','?')} on {v.get('target','?')}" for v in vulns[:10]]) or "No vulnerabilities recorded yet."
+        self._dash_recent_list.setPlainText(recent_text)
+
+    def _build_vuln_tracker(self):
+        title = QLabel("🐛 Vulnerability Tracker")
+        title.setStyleSheet(f"font-size:18px;color:{C['red']};font-family:monospace;font-weight:bold;padding:8px;")
+        self._vuln_sl.addWidget(title)
+
+        add_row = QHBoxLayout()
+        self._vuln_target = QLineEdit()
+        self._vuln_target.setPlaceholderText("Target (e.g., 192.168.1.1)")
+        self._vuln_target.setStyleSheet(f"QLineEdit{{background:{C['surface']};border:1px solid {C['border']};border-radius:8px;padding:8px;color:{C['fg']};font-family:monospace;font-size:12px;}}")
+        self._vuln_title = QLineEdit()
+        self._vuln_title.setPlaceholderText("Vulnerability Title")
+        self._vuln_title.setStyleSheet(f"QLineEdit{{background:{C['surface']};border:1px solid {C['border']};border-radius:8px;padding:8px;color:{C['fg']};font-family:monospace;font-size:12px;}}")
+        self._vuln_sev = QComboBox()
+        self._vuln_sev.addItems(list(VULN_SEVERITY.keys()))
+        self._vuln_sev.setStyleSheet(f"QComboBox{{background:{C['surface']};border:1px solid {C['border']};border-radius:8px;padding:6px;color:{C['fg']};font-size:12px;font-family:monospace;}}")
+        add_btn = QPushButton("+ Add")
+        add_btn.setStyleSheet(_BTN_P)
+        add_btn.clicked.connect(self._add_vuln)
+        add_row.addWidget(self._vuln_target)
+        add_row.addWidget(self._vuln_title)
+        add_row.addWidget(self._vuln_sev)
+        add_row.addWidget(add_btn)
+        self._vuln_sl.addLayout(add_row)
+
+        self._vuln_list = QTextEdit()
+        self._vuln_list.setReadOnly(True)
+        self._vuln_list.setStyleSheet(f"QTextEdit{{background:{C['surface']};border:1px solid {C['border']};border-radius:8px;padding:10px;color:{C['fg']};font-family:monospace;font-size:11px;}}")
+        self._vuln_sl.addWidget(self._vuln_list)
+        self._vuln_sl.addStretch()
+
+    def _load_vulns(self):
+        vuln_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".vulns.json")
+        try:
+            if os.path.exists(vuln_path):
+                with open(vuln_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception: pass
+        return []
+
+    def _save_vulns(self, vulns):
+        vuln_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".vulns.json")
+        try:
+            with open(vuln_path, "w", encoding="utf-8") as f:
+                json.dump(vulns, f, indent=2)
+        except Exception: pass
+
+    def _add_vuln(self):
+        target = self._vuln_target.text().strip() or self._target_history.lineEdit().text().strip() or "unknown"
+        title = self._vuln_title.text().strip()
+        sev = self._vuln_sev.currentText()
+        if not title: return
+        vulns = self._load_vulns()
+        vulns.insert(0, {"target": target, "title": title, "severity": sev, "date": datetime.now().strftime("%Y-%m-%d %H:%M"), "status": "Open", "proof": ""})
+        self._save_vulns(vulns)
+        self._vuln_title.clear()
+        self._refresh_vulns()
+
+    def _refresh_vulns(self):
+        vulns = self._load_vulns()
+        lines = ["Severity | Target | Title | Date | Status", "-" * 100]
+        for v in vulns:
+            color = VULN_SEVERITY.get(v.get("severity","Info"), C['dim'])
+            lines.append(f'<span style="color:{color};">{v.get("severity","?")}</span> | {v.get("target","?")} | {v.get("title","?")} | {v.get("date","?")} | {v.get("status","Open")}')
+        self._vuln_list.setHtml("\n".join(lines))
+
+    def _build_copilot(self):
+        title = QLabel("🤖 AI Copilot")
+        title.setStyleSheet(f"font-size:18px;color:{C['purple']};font-family:monospace;font-weight:bold;padding:8px;")
+        self._copilot_sl.addWidget(title)
+
+        hint = QLabel("Ask for help with commands, analysis, or pentest strategies. (Local mode — no API key required)")
+        hint.setStyleSheet(f"font-size:11px;color:{C['dim']};font-family:monospace;padding:4px;")
+        hint.setWordWrap(True)
+        self._copilot_sl.addWidget(hint)
+
+        self._copilot_out = QTextEdit()
+        self._copilot_out.setReadOnly(True)
+        self._copilot_out.setStyleSheet(f"QTextEdit{{background:{C['surface']};border:1px solid {C['border']};border-radius:8px;padding:10px;color:{C['fg']};font-family:monospace;font-size:12px;}}")
+        self._copilot_out.setMinimumHeight(300)
+        self._copilot_sl.addWidget(self._copilot_out)
+
+        input_row = QHBoxLayout()
+        self._copilot_in = QLineEdit()
+        self._copilot_in.setPlaceholderText("Ask copilot… (e.g., 'How to scan for SQLi?', 'Analyze nmap output')")
+        self._copilot_in.setStyleSheet(f"QLineEdit{{background:{C['surface']};border:1px solid {C['border']};border-radius:8px;padding:9px;color:{C['fg']};font-family:monospace;font-size:12px;}}")
+        self._copilot_in.returnPressed.connect(self._ask_copilot)
+        send_btn = QPushButton("Send")
+        send_btn.setStyleSheet(_BTN_P)
+        send_btn.clicked.connect(self._ask_copilot)
+        input_row.addWidget(self._copilot_in)
+        input_row.addWidget(send_btn)
+        self._copilot_sl.addLayout(input_row)
+        self._copilot_sl.addStretch()
+
+    def _ask_copilot(self):
+        q = self._copilot_in.text().strip()
+        if not q: return
+        self._copilot_in.clear()
+        self._copilot_out.append(f'<span style="color:{C["blue"]};">You:</span> {q}\n')
+        
+        target = self._target_history.lineEdit().text().strip() or "<target>"
+        response = self._generate_copilot_response(q, target)
+        self._copilot_out.append(f'<span style="color:{C["green"]};">Copilot:</span> {response}\n')
+        self._copilot_out.append("-" * 80 + "\n")
+
+    def _generate_copilot_response(self, q, target):
+        q_lower = q.lower()
+        
+        # Check what tools are installed for more accurate advice
+        installed_tools = [k for k in TOOL_WIKI.keys() if check_installed(k)]
+        has_nmap = "nmap" in installed_tools
+        has_nuclei = "nuclei" in installed_tools
+        has_sqlmap = "sqlmap" in installed_tools
+        has_nikto = "nikto" in installed_tools
+        has_gobuster = "gobuster" in installed_tools
+        has_ffuf = "ffuf" in installed_tools
+        has_dirsearch = "dirsearch" in installed_tools
+        has_wpscan = "wpscan" in installed_tools
+        has_arjun = "arjun" in installed_tools
+        has_hydra = "hydra" in installed_tools
+        has_john = "john" in installed_tools
+        has_hashcat = "hashcat" in installed_tools
+        has_metasploit = "metasploit" in installed_tools
+        has_bettercap = "bettercap" in installed_tools
+        has_wireshark = "wireshark" in installed_tools
+        
+        if "nmap" in q_lower or "scan" in q_lower or "recon" in q_lower:
+            if not has_nmap:
+                return f"Nmap is not installed. Use the 'install missing' button to install it first. For reconnaissance, you could also try: `naabu -host {target}` (if naabu is installed) or `netdiscover -r {target}/24` for local network discovery."
+            if "quick" in q_lower or "fast" in q_lower:
+                return f"For quick scanning: `nmap -F {target}` (fast mode) or `nmap -p 80,443,22,21,25 {target}` (common ports)."
+            elif "full" in q_lower or "complete" in q_lower:
+                return f"For comprehensive scan: `nmap -sV -sC -p- {target}` (version + default scripts + all ports). Add `-O` for OS detection, `-A` for aggressive scan."
+            elif "vuln" in q_lower or "vulnerability" in q_lower:
+                return f"For vulnerability scanning: `nmap -sV --script vuln {target}` or use nuclei: `nuclei -u https://{target}` (if web target)."
+            else:
+                return f"Start with: `nmap -sV {target}` to discover services. Then based on findings, you can run targeted scans or use nuclei for web vulns: `nuclei -u https://{target}`."
+                
+        elif "web" in q_lower or "website" in q_lower or "http" in q_lower:
+            if not target or target == "<target>":
+                return "Please set a target first using the target bar at the top (e.g., example.com or 192.168.1.100)"
+            
+            web_tools = []
+            if has_nuclei: web_tools.append("nuclei")
+            if has_nikto: web_tools.append("nikto") 
+            if has_sqlmap: web_tools.append("sqlmap")
+            if has_gobuster: web_tools.append("gobuster")
+            if has_ffuf: web_tools.append("ffuf")
+            if has_dirsearch: web_tools.append("dirsearch")
+            if has_wpscan and "wordpress" in q_lower: web_tools.append("wpscan")
+            
+            if not web_tools:
+                return "No web testing tools installed. Use 'install missing' to get nuclei, nikto, sqlmap, gobuster, etc."
+                
+            if "scan" in q_lower or "test" in q_lower:
+                suggestions = []
+                if has_nuclei: suggestions.append(f"nuclei -u https://{target}")
+                if has_nikto: suggestions.append(f"nikto -h https://{target}")
+                if has_gobuster: suggestions.append(f"gobuster dir -u https://{target} -w /usr/share/wordlists/dirb/common.txt")
+                if has_ffuf: suggestions.append(f"ffuf -u https://{target}/FUZZ -w /usr/share/wordlists/common.txt")
+                return f"Web testing suggestions for {target}:\n" + "\n".join(f"• {s}" for s in suggestions[:3])
+            elif "dir" in q_lower or "directory" in q_lower or "brute" in q_lower:
+                if has_gobuster: return f"Try: `gobuster dir -u https://{target} -w /usr/share/wordlists/dirb/common.txt -x php,html,txt`"
+                if has_ffuf: return f"Try: `ffuf -u https://{target}/FUZZ -w /usr/share/wordlists/common.txt`"
+                return "Consider installing gobuster or ffuf for directory brute-forcing."
+            elif "param" in q_lower or "parameter" in q_lower:
+                if has_arjun: return f"Try: `arjun -u https://{target} --get` to discover HTTP parameters"
+                return "Consider installing arjun for HTTP parameter discovery."
+            else:
+                return f"For web app testing on {target}: Start with nuclei (`nuclei -u https://{target}`), then try directory brute-forcing with gobuster/ffuf, and parameter discovery with arjun."
+                
+        elif "sql" in q_lower or "sqli" in q_lower or "injection" in q_lower:
+            if not has_sqlmap:
+                return "SQLMap is not installed. Use 'install missing' to install it first."
+            if not target or target == "<target>":
+                return "Please set a target URL first (e.g., http://example.com/page?id=1)"
+            return f"Use: `sqlmap -u 'http://{target}/page?id=1' --batch` to test for SQL injection. Add `--dbs` to enumerate databases, `--tables -D dbname` to list tables, `--dump -D dbname -T tbl` to extract data."
+            
+        elif "password" in q_lower or "hash" in q_lower or "crack" in q_lower:
+            if not has_hashcat and not has_john:
+                return "No password cracking tools installed. Use 'install missing' to get john and hashcat."
+            if "hashcat" in q_lower or ("gpu" in q_lower and has_hashcat):
+                return f"Hashcat examples: `hashcat -m 0 -a 0 hash.txt rockyou.txt` (MD5), `hashcat -m 1000 -a 0 hash.txt rockyou.txt` (NTLM), `hashcat -m 3200 -a 0 hash.txt rockyou.txt` (bcrypt)."
+            elif "john" in q_lower:
+                return f"John examples: `john --wordlist=rockyou.txt hash.txt`, `john --show hash.txt` (show cracked), `john --incremental hash.txt` (brute force)."
+            else:
+                return f"For password cracking: Use hashcat for GPU-accelerated cracking (faster) or john for CPU-based. First identify hash type with: `hashcat -m 0 hash.txt` (try different -m values) or use `name-that-hash` tool."
+                
+        elif "wireless" in q_lower or "wifi" in q_lower or "wifi" in q_lower:
+            wireless_tools = [t for t in ["aircrack-ng", "reaver", "wifite", "bettercap"] if t in installed_tools]
+            if not wireless_tools:
+                return "No wireless tools installed. Use 'install missing' to get aircrack-ng, reaver, etc."
+            if "scan" in q_lower or "discover" in q_lower:
+                return f"For WiFi discovery: `sudo airodump-ng wlan0mon` (requires monitor mode). For WPS attacks: `sudo reaver -i wlan0mon -b <BSSID> -vv`."
+            elif "crack" in q_lower:
+                return f"For WPA/WPA2 cracking: Capture handshake with airodump-ng, then use `aircrack-ng -w wordlist.txt capture.cap`."
+            else:
+                return f"Available wireless tools: {', '.join(wireless_tools)}. Start with `sudo airmon-ng start wlan0` to enable monitor mode, then `sudo airodump-ng wlan0mon`."
+                
+        elif "ad" in q_lower or "active directory" in q_lower or "domain" in q_lower:
+            ad_tools = [t for t in ["crackmapexec", "bloodhound", "nmc", "windapsearch"] if t in installed_tools]
+            if not ad_tools:
+                return "No AD tools installed. Use 'install missing' to get crackmapexec, bloodhound, etc."
+            if "enum" in q_lower or "enumerate" in q_lower:
+                return f"For AD enumeration: `crackmapexec smb {target} -u '' -p '' --users` (anonymous) or provide credentials. For deep enumeration: `bloodhound-python -d <domain> -u <user> -p '<pass>' -c All --zip`."
+            elif "password" in q_lower or "spray" in q_lower:
+                return f"For password spraying: `crackmapexec smb {target} -u users.txt -p 'Password123' --continue-on-success`."
+            else:
+                return f"AD tools available: {', '.join(ad_tools)}. Start with SMB enumeration: `crackmapexec smb {target} --users --shares --sessions` (anonymous)."
+                
+        elif "vuln" in q_lower or "vulnerability" in q_lower:
+            if not target or target == "<target>":
+                return "Please set a target first."
+            vuln_tools = []
+            if has_nuclei: vuln_tools.append("nuclei")
+            if has_nikto: vuln_tools.append("nikto")
+            if has_sqlmap: vuln_tools.append("sqlmap")
+            if has_nmap and ("script" in q_lower or "nmap" in q_lower): vuln_tools.append("nmap with vuln scripts")
+            if not vuln_tools:
+                return "No vulnerability scanners installed. Use 'install missing' to get nuclei, nikto, sqlmap."
+            return f"For vulnerability scanning on {target}:\n" + \
+                   f"• Web: `nuclei -u https://{target}` or `nikto -h https://{target}`\n" + \
+                   f"• Network: `nmap -sV --script vuln {target}`\n" + \
+                   f"• Database: If web app found, try `sqlmap -u 'http://{target}/page?id=1' --batch`"
+                   
+        elif "help" in q_lower or "how" in q_lower or "what" in q_lower:
+            installed_count = len(installed_tools)
+            total_count = len(TOOL_WIKI)
+            return f"FG-Dist Pentool beta help:\n" + \
+                   f"• {installed_count}/{total_count} tools installed\n" + \
+                   f"• Current target: {target if target != '<target>' else 'Not set'}\n" + \
+                   f"• Quick workflow: Set target → Run nmap scan → Use nuclei for web vulns → Try directory brute-forcing → Test for SQLi/XSS\n" + \
+                   f"• Use Tab key in terminal for command completion\n" + \
+                   f"• Use ↑/↓ arrow keys to cycle through command history\n" + \
+                   f"• Ask me about: scanning, web testing, password cracking, AD enumeration, wireless, vulnerability scanning"
+                   
+        else:
+            # Generic helpful response based on available tools and target
+            if not target or target == "<target>":
+                return "Please set a target first using the target bar at the top. Then I can give you specific advice!"
+                
+            advice_parts = []
+            if has_nmap:
+                advice_parts.append(f"Start with reconnaissance: `nmap -sV {target}`")
+            if has_nuclei and ("http" in target.lower() or target.startswith("http") or "." in target):
+                advice_parts.append(f"Then scan for web vulns: `nuclei -u https://{target}`")
+            if has_gobuster or has_ffuf:
+                advice_parts.append(f"For directory brute-forcing: Try gobuster or ffuf with common wordlists")
+            if has_sqlmap and ("http" in target.lower() or target.startswith("http")):
+                advice_parts.append(f"If you find web forms/apps: Test for SQLi with sqlmap")
+            if len(installed_tools) < 10:
+                advice_parts.append(f"Tip: Use 'install missing' to get more tools installed")
+                
+            if advice_parts:
+                return "Suggested workflow for your target:\n• " + "\n• ".join(advice_parts)
+            else:
+                return f"I see you have {len(installed_tools)} tools installed. Use 'install missing' to get essential tools like nmap, nuclei, sqlmap, etc. Then set a target and I'll give you specific advice!"
+
+    def _sessions_dir(self):
+        p = os.path.join(_app_dir(), "sessions")
+        os.makedirs(p, exist_ok=True)
+        return p
+
+    def _vault_path(self):
+        return os.path.join(_app_dir(), ".credential_vault.json")
+
+    def _api_key_path(self):
+        return os.path.join(_app_dir(), ".api_keys.json")
+
+    def _workflow_path(self):
+        return os.path.join(_app_dir(), ".workflows.json")
+
+    def _custom_tools_path(self):
+        return os.path.join(_app_dir(), ".custom_tools.json")
+
+    def _collect_workspace_state(self):
+        terms = []
+        for i in range(self._term_tabs.count()):
+            w = self._term_tabs.widget(i)
+            if not w:
+                continue
+            out = w.findChild(QTextEdit, "term_out")
+            inp = w.findChild(QLineEdit, "term_in")
+            terms.append({
+                "name": self._term_tabs.tabText(i),
+                "output": out.toPlainText() if out else "",
+                "input": inp.text() if inp else "",
+                "queue": list(getattr(w, "_queue", [])),
+            })
+        return {
+            "saved_at": datetime.now().isoformat(),
+            "target": self._target_history.lineEdit().text().strip(),
+            "search": self._search.text().strip(),
+            "theme": UI_CONFIG.get("theme", "Neon"),
+            "terminals": terms,
+            "favorites": self._load_favorites(),
+            "vulns": self._load_vulns(),
+            "custom_tools": self._custom_tools,
+        }
+
+    def _apply_workspace_state(self, state):
+        target = state.get("target", "")
+        if target:
+            self._target_history.lineEdit().setText(target)
+            self._save_current_target()
+        self._search.setText(state.get("search", ""))
+
+        terms = state.get("terminals", [])
+        while self._term_tabs.count() > 1:
+            self._close_terminal_tab(self._term_tabs.count() - 1)
+        if terms:
+            first = terms[0]
+            self._term_tabs.setTabText(0, first.get("name", "Terminal 1"))
+            w = self._term_tabs.widget(0)
+            out = w.findChild(QTextEdit, "term_out")
+            inp = w.findChild(QLineEdit, "term_in")
+            if out:
+                out.setPlainText(first.get("output", ""))
+            if inp:
+                inp.setText(first.get("input", ""))
+            w._queue = list(first.get("queue", []))
+            for t in terms[1:]:
+                self._add_terminal_tab(t.get("name", "Terminal"))
+                w2 = self._term_tabs.widget(self._term_tabs.currentIndex())
+                out2 = w2.findChild(QTextEdit, "term_out")
+                inp2 = w2.findChild(QLineEdit, "term_in")
+                if out2:
+                    out2.setPlainText(t.get("output", ""))
+                if inp2:
+                    inp2.setText(t.get("input", ""))
+                w2._queue = list(t.get("queue", []))
+        self._update_queue_label()
+
+    def _save_workspace(self):
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(self._sessions_dir(), f"workspace_{ts}.json")
+        ok = _json_save(path, self._collect_workspace_state())
+        self._append_terminal(f"[session] {'saved' if ok else 'failed'}: {path}\n")
+
+    def _autosave_workspace(self):
+        path = os.path.join(self._sessions_dir(), "autosave_latest.json")
+        _json_save(path, self._collect_workspace_state())
+
+    def _load_latest_workspace(self):
+        sdir = self._sessions_dir()
+        candidates = []
+        try:
+            for fn in os.listdir(sdir):
+                if fn.endswith(".json"):
+                    p = os.path.join(sdir, fn)
+                    candidates.append((os.path.getmtime(p), p))
+        except Exception:
+            pass
+        if not candidates:
+            self._append_terminal("[session] no saved session found\n")
+            return
+        candidates.sort(reverse=True)
+        path = candidates[0][1]
+        state = _json_load(path, {})
+        if not state:
+            self._append_terminal(f"[session] failed to load: {path}\n")
+            return
+        self._apply_workspace_state(state)
+        self._append_terminal(f"[session] restored: {path}\n")
+
+    def _open_credential_vault(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Credential Vault")
+        dlg.resize(700, 460)
+        lay = QVBoxLayout(dlg)
+        pwd = QLineEdit()
+        pwd.setEchoMode(QLineEdit.EchoMode.Password)
+        pwd.setPlaceholderText("Vault password")
+        pwd.setStyleSheet(f"QLineEdit{{background:{C['surface']};border:1px solid {C['border']};border-radius:8px;padding:8px;color:{C['fg']};font-family:monospace;}}")
+        lay.addWidget(pwd)
+        status = QLabel("locked")
+        status.setStyleSheet(f"color:{C['dim']};font-family:monospace;")
+        lay.addWidget(status)
+        table = QTableWidget(0, 3)
+        table.setHorizontalHeaderLabels(["service", "username", "secret"])
+        table.setStyleSheet(f"QTableWidget{{background:{C['bg']};border:1px solid {C['border']};color:{C['fg']};font-family:monospace;font-size:11px;}}")
+        lay.addWidget(table)
+        search = QLineEdit(); search.setPlaceholderText("search service/user/secret")
+        search.setStyleSheet(f"QLineEdit{{background:{C['surface']};border:1px solid {C['border']};border-radius:8px;padding:8px;color:{C['fg']};font-family:monospace;}}")
+        lay.addWidget(search)
+        form = QHBoxLayout()
+        svc = QLineEdit(); svc.setPlaceholderText("service")
+        usr = QLineEdit(); usr.setPlaceholderText("username")
+        sec = QLineEdit(); sec.setPlaceholderText("secret/hash/password")
+        form.addWidget(svc); form.addWidget(usr); form.addWidget(sec)
+        lay.addLayout(form)
+        btns = QHBoxLayout()
+        unlock = QPushButton("unlock"); unlock.setStyleSheet(_BTN)
+        add = QPushButton("add"); add.setStyleSheet(_BTN_P)
+        save = QPushButton("save"); save.setStyleSheet(_BTN_O)
+        edit_selected = QPushButton("edit selected"); edit_selected.setStyleSheet(_BTN)
+        delete_match = QPushButton("delete match"); delete_match.setStyleSheet(_BTN)
+        export = QPushButton("export txt"); export.setStyleSheet(_BTN)
+        btns.addWidget(unlock); btns.addWidget(add); btns.addWidget(save); btns.addWidget(edit_selected); btns.addWidget(delete_match); btns.addWidget(export); btns.addStretch()
+        lay.addLayout(btns)
+
+        state = {"items": []}
+
+        def render():
+            q = search.text().strip().lower()
+            table.setRowCount(0)
+            for it in state["items"]:
+                row = f"{it.get('service','')} | {it.get('username','')} | {it.get('secret','')}"
+                if q and q not in row.lower():
+                    continue
+                r = table.rowCount()
+                table.insertRow(r)
+                table.setItem(r, 0, QTableWidgetItem(it.get("service", "")))
+                table.setItem(r, 1, QTableWidgetItem(it.get("username", "")))
+                table.setItem(r, 2, QTableWidgetItem(it.get("secret", "")))
+
+        def do_unlock():
+            p = pwd.text().strip()
+            if not p:
+                status.setText("enter password first")
+                return
+            data = _json_load(self._vault_path(), {})
+            if not data:
+                state["items"] = []
+                self._vault_unlocked = True
+                self._vault_password = p
+                status.setText("unlocked (new vault)")
+                render()
+                return
+            try:
+                plain = _decrypt_text(data.get("blob", ""), p)
+                parsed = json.loads(plain)
+                state["items"] = parsed.get("items", [])
+                self._vault_unlocked = True
+                self._vault_password = p
+                status.setText("unlocked")
+                render()
+            except Exception:
+                status.setText("unlock failed")
+
+        def do_add():
+            if not self._vault_unlocked:
+                status.setText("unlock vault first")
+                return
+            state["items"].insert(0, {"service": svc.text().strip(), "username": usr.text().strip(), "secret": sec.text().strip(), "date": datetime.now().isoformat()})
+            svc.clear(); usr.clear(); sec.clear(); render()
+
+        def do_save():
+            if not self._vault_unlocked:
+                status.setText("unlock vault first")
+                return
+            blob = _encrypt_text(json.dumps({"items": state["items"]}), self._vault_password)
+            ok = _json_save(self._vault_path(), {"blob": blob, "updated": datetime.now().isoformat()})
+            status.setText("saved" if ok else "save failed")
+
+        def do_export():
+            path = os.path.join(_app_dir(), "reports", f"vault_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    for it in state["items"]:
+                        f.write(f"{it.get('service','')}:{it.get('username','')}:{it.get('secret','')}\n")
+                status.setText(f"exported: {path}")
+            except Exception as e:
+                status.setText(f"export failed: {e}")
+
+        def do_edit_selected():
+            if not self._vault_unlocked:
+                status.setText("unlock vault first")
+                return
+            r = table.currentRow()
+            if r < 0:
+                status.setText("select a row")
+                return
+            service = table.item(r, 0).text() if table.item(r, 0) else ""
+            user = table.item(r, 1).text() if table.item(r, 1) else ""
+            secret = table.item(r, 2).text() if table.item(r, 2) else ""
+            svc.setText(service)
+            usr.setText(user)
+            sec.setText(secret)
+            q = f"{service} {user} {secret}".lower()
+            for i, it in enumerate(state["items"]):
+                row = f"{it.get('service','')} {it.get('username','')} {it.get('secret','')}".lower()
+                if row == q:
+                    state["items"].pop(i)
+                    break
+            render()
+            status.setText("loaded row into form; press add to update")
+
+        def do_delete_match():
+            q = search.text().strip().lower()
+            if not q:
+                return
+            idx = -1
+            for i, it in enumerate(state["items"]):
+                row = f"{it.get('service','')} {it.get('username','')} {it.get('secret','')}".lower()
+                if q in row:
+                    idx = i
+                    break
+            if idx >= 0:
+                state["items"].pop(idx)
+                render()
+
+        unlock.clicked.connect(do_unlock)
+        add.clicked.connect(do_add)
+        save.clicked.connect(do_save)
+        edit_selected.clicked.connect(do_edit_selected)
+        delete_match.clicked.connect(do_delete_match)
+        export.clicked.connect(do_export)
+        search.textChanged.connect(lambda _: render())
+        dlg.exec()
+
+    def _open_api_key_manager(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("API Key Manager")
+        dlg.resize(640, 420)
+        lay = QVBoxLayout(dlg)
+        pwd = QLineEdit(); pwd.setEchoMode(QLineEdit.EchoMode.Password); pwd.setPlaceholderText("Password for API key vault")
+        lay.addWidget(pwd)
+        services = ["shodan", "virustotal", "censys", "securitytrails", "github", "gitlab", "aws", "azure", "gcp"]
+        inputs = {}
+        for s in services:
+            row = QHBoxLayout()
+            lbl = QLabel(s)
+            key = QLineEdit(); key.setPlaceholderText(f"{s} api key/token")
+            row.addWidget(lbl); row.addWidget(key)
+            lay.addLayout(row)
+            inputs[s] = key
+        search = QLineEdit(); search.setPlaceholderText("filter services")
+        lay.addWidget(search)
+        msg = QLabel("")
+        msg.setStyleSheet(f"color:{C['soft']};font-family:monospace;")
+        lay.addWidget(msg)
+        rowb = QHBoxLayout()
+        load = QPushButton("load"); load.setStyleSheet(_BTN)
+        save = QPushButton("save"); save.setStyleSheet(_BTN_P)
+        clear_all = QPushButton("clear all"); clear_all.setStyleSheet(_BTN)
+        rowb.addWidget(load); rowb.addWidget(save); rowb.addWidget(clear_all); rowb.addStretch()
+        lay.addLayout(rowb)
+
+        def do_load():
+            p = pwd.text().strip()
+            if not p:
+                msg.setText("enter password")
+                return
+            data = _json_load(self._api_key_path(), {})
+            if not data:
+                msg.setText("no saved keys yet")
+                return
+            try:
+                plain = _decrypt_text(data.get("blob", ""), p)
+                vals = json.loads(plain)
+                for s in services:
+                    inputs[s].setText(vals.get(s, ""))
+                msg.setText("loaded")
+            except Exception:
+                msg.setText("failed to decrypt")
+
+        def do_save():
+            p = pwd.text().strip()
+            if not p:
+                msg.setText("enter password")
+                return
+            vals = {s: inputs[s].text().strip() for s in services}
+            blob = _encrypt_text(json.dumps(vals), p)
+            ok = _json_save(self._api_key_path(), {"blob": blob, "updated": datetime.now().isoformat()})
+            msg.setText("saved" if ok else "save failed")
+
+        def do_clear_all():
+            for s in services:
+                inputs[s].clear()
+            msg.setText("cleared fields")
+
+        def do_filter():
+            q = search.text().strip().lower()
+            for s in services:
+                w = inputs[s]
+                w.setEnabled((not q) or (q in s.lower()))
+
+        load.clicked.connect(do_load)
+        save.clicked.connect(do_save)
+        clear_all.clicked.connect(do_clear_all)
+        search.textChanged.connect(lambda _: do_filter())
+        dlg.exec()
+
+    def _load_custom_tools(self):
+        return _json_load(self._custom_tools_path(), [])
+
+    def _save_custom_tools(self):
+        return _json_save(self._custom_tools_path(), self._custom_tools)
+
+    def _open_custom_tools_dialog(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Custom Tools")
+        dlg.resize(760, 460)
+        lay = QVBoxLayout(dlg)
+        out = QTextEdit(); out.setReadOnly(True)
+        lay.addWidget(out)
+        row = QHBoxLayout()
+        name = QLineEdit(); name.setPlaceholderText("name")
+        desc = QLineEdit(); desc.setPlaceholderText("description")
+        cmd = QLineEdit(); cmd.setPlaceholderText("command with placeholders, e.g. python3 script.py <target>")
+        row.addWidget(name); row.addWidget(desc); row.addWidget(cmd)
+        lay.addLayout(row)
+        btn = QHBoxLayout()
+        add = QPushButton("add"); add.setStyleSheet(_BTN_P)
+        rm = QPushButton("remove first"); rm.setStyleSheet(_BTN)
+        save = QPushButton("save + rebuild"); save.setStyleSheet(_BTN_O)
+        btn.addWidget(add); btn.addWidget(rm); btn.addWidget(save); btn.addStretch()
+        lay.addLayout(btn)
+
+        def render():
+            lines = ["Custom tools", "-" * 80]
+            for i, t in enumerate(self._custom_tools):
+                lines.append(f"{i+1}. {t.get('name','')} | {t.get('desc','')} | {t.get('cmd','')}")
+            out.setPlainText("\n".join(lines))
+
+        def do_add():
+            n = name.text().strip()
+            c = cmd.text().strip()
+            if not n or not c:
+                return
+            self._custom_tools.append({"name": n, "desc": desc.text().strip() or "Custom tool", "cmd": c, "wiki": n.lower().replace(" ", "-")})
+            name.clear(); desc.clear(); cmd.clear(); render()
+
+        def do_rm():
+            if self._custom_tools:
+                self._custom_tools.pop(0)
+                render()
+
+        def do_save():
+            self._save_custom_tools()
+            self._rebuild()
+            dlg.accept()
+
+        add.clicked.connect(do_add)
+        rm.clicked.connect(do_rm)
+        save.clicked.connect(do_save)
+        render()
+        dlg.exec()
+
+    def _load_workflows(self):
+        return _json_load(self._workflow_path(), [])
+
+    def _save_workflows(self, workflows):
+        _json_save(self._workflow_path(), workflows)
+
+    def _open_workflow_dialog(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Workflow Engine")
+        dlg.resize(760, 500)
+        lay = QVBoxLayout(dlg)
+        out = QTextEdit(); out.setReadOnly(True)
+        lay.addWidget(out)
+        name = QLineEdit(); name.setPlaceholderText("workflow name")
+        condition = QLineEdit(); condition.setPlaceholderText("optional condition: run only if active terminal contains this text")
+        cmds = QTextEdit(); cmds.setPlaceholderText("one command per line, placeholders allowed (<target>)")
+        cmds.setMinimumHeight(120)
+        lay.addWidget(name); lay.addWidget(condition); lay.addWidget(cmds)
+        btns = QHBoxLayout()
+        add = QPushButton("save workflow"); add.setStyleSheet(_BTN_P)
+        run_idx = QLineEdit(); run_idx.setPlaceholderText("run #")
+        run_idx.setFixedWidth(80)
+        run = QPushButton("run workflow"); run.setStyleSheet(_BTN_O)
+        btns.addWidget(add); btns.addWidget(run_idx); btns.addWidget(run); btns.addStretch()
+        lay.addLayout(btns)
+        workflows = self._load_workflows()
+
+        def render():
+            lines = ["Workflows", "-" * 80]
+            for i, wf in enumerate(workflows):
+                lines.append(f"{i+1}. {wf.get('name','')} ({len(wf.get('commands',[]))} commands)")
+                if wf.get("condition"):
+                    lines.append(f"    condition: {wf.get('condition')}")
+            out.setPlainText("\n".join(lines))
+
+        def do_add():
+            n = name.text().strip() or f"workflow_{len(workflows)+1}"
+            command_list = [x.strip() for x in cmds.toPlainText().splitlines() if x.strip()]
+            if not command_list:
+                return
+            workflows.append({"name": n, "commands": command_list, "condition": condition.text().strip(), "created": datetime.now().isoformat()})
+            self._save_workflows(workflows)
+            name.clear(); condition.clear(); cmds.clear(); render()
+
+        def do_run_selected():
+            if not workflows:
+                return
+            idx = 0
+            try:
+                if run_idx.text().strip():
+                    idx = max(0, int(run_idx.text().strip()) - 1)
+            except Exception:
+                idx = 0
+            if idx >= len(workflows):
+                idx = 0
+            wf = workflows[idx]
+            cond = wf.get("condition", "").strip()
+            if cond and (not self._workflow_condition_match(cond)):
+                self._append_terminal(f"[workflow] condition not met: '{cond}'\n")
+                return
+            self._append_terminal(f"[workflow] running: {wf.get('name')}\n")
+            self._run_macro(wf.get("commands", []))
+            dlg.accept()
+
+        add.clicked.connect(do_add)
+        run.clicked.connect(do_run_selected)
+        render()
+        dlg.exec()
+
+    def _workflow_condition_match(self, expression):
+        expression = (expression or "").strip()
+        if not expression:
+            return True
+        _, out, _ = self._get_active_terminal()
+        if not out:
+            return False
+        text = out.toPlainText().lower()
+
+        def _check_token(tok):
+            tok = tok.strip().lower()
+            if not tok:
+                return True
+            if tok.startswith("not "):
+                return tok[4:].strip() not in text
+            if tok.startswith("!"):
+                return tok[1:].strip() not in text
+            return tok in text
+
+        or_parts = [p.strip() for p in expression.split("||") if p.strip()]
+        if not or_parts:
+            or_parts = [expression]
+        for part in or_parts:
+            and_parts = [a.strip() for a in part.split("&&") if a.strip()]
+            if and_parts and all(_check_token(t) for t in and_parts):
+                return True
+        return False
+
+    def _extract_credentials_from_text(self, text):
+        if not text:
+            return
+        pairs = re.findall(r"([A-Za-z0-9_.-]{2,32})[:=]([A-Za-z0-9!@#$%^&*()_+\-={}|\[\]:;'<>,.?/]{4,128})", text)
+        if not pairs:
+            return
+        hits_path = os.path.join(_app_dir(), ".credential_hits.json")
+        hits = _json_load(hits_path, [])
+        for u, s in pairs[:3]:
+            hits.insert(0, {"service": "detected", "username": u, "secret": s, "date": datetime.now().isoformat()})
+        hits = hits[:200]
+        _json_save(hits_path, hits)
+
+    def closeEvent(self, event):
+        try:
+            self._autosave_workspace()
+        except Exception:
+            pass
+        super().closeEvent(event)
 
     # ── tools grid ──
 
@@ -1862,7 +3152,26 @@ class MainWindow(QMainWindow):
             fav_widget.setLayout(fav_grid)
             self._sl.addWidget(fav_widget)
 
-        for cat, tools in CATEGORIES.items():
+        categories = dict(CATEGORIES)
+        if self._custom_tools:
+            categories["Custom Tools"] = {
+                t.get("name", "custom"): {
+                    "wiki": t.get("wiki", t.get("name", "custom").lower().replace(" ", "-")),
+                    "desc": t.get("desc", "Custom tool"),
+                }
+                for t in self._custom_tools
+            }
+            for t in self._custom_tools:
+                wkey = t.get("wiki", t.get("name", "custom").lower().replace(" ", "-"))
+                TOOL_WIKI[wkey] = {
+                    "url": "",
+                    "examples": [t.get("cmd", "")],
+                    "desc": t.get("desc", "Custom tool"),
+                }
+                TOOL_CMDS[wkey] = t.get("cmd", "")
+                TOOL_CATEGORY[wkey] = "Custom Tools"
+
+        for cat, tools in categories.items():
             open_ = cat in ("Recon & OSINT","Scanning & Enumeration","Exploitation","Web Testing")
             header = QPushButton()
             header._open = open_
